@@ -1,0 +1,7 @@
+# Normalise line endings in the repo; Windows checkouts still get CRLF where git is set up that way.
+* text=auto
+
+# binary assets
+*.png binary
+*.ico binary
+*.icns binary

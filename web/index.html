@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Y2Kbot</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="logo.svg" />
+</head>
+<body>
+  <div id="desktop"></div>
+
+  <div id="taskbar">
+    <button id="start-btn"><img src="logo.svg" alt="" /> Y2K</button>
+    <div id="task-buttons"></div>
+    <div id="tray"><span id="tray-conn" title="Connection">●</span><span id="clock"></span></div>
+  </div>
+
+  <!-- ===== templates ===== -->
+  <template id="tpl-window">
+    <div class="window">
+      <div class="titlebar">
+        <img class="title-icon" src="logo.svg" alt="" />
+        <span class="title"></span>
+        <div class="title-buttons">
+          <button class="tb tb-min" title="Minimize"><span>_</span></button>
+          <button class="tb tb-close" title="Close"><span>✕</span></button>
+        </div>
+      </div>
+      <div class="window-body"></div>
+    </div>
+  </template>
+
+  <script src="sounds.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

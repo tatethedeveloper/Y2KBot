@@ -1,0 +1,36 @@
+# dependencies and build output
+node_modules/
+dist/
+release/
+*.tsbuildinfo
+
+# local data — never commit (agent memory, attachments, shared folders, MCP config, settings)
+data/
+mcp.json
+settings.json
+
+# Windows XP disk images and install media (licensed software, and huge)
+*.qcow2
+*.img
+*.iso
+*.vhd
+*.vhdx
+*.vdi
+*.vmdk
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+npm-debug.log*
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/*
+!.vscode/extensions.json
+.idea/

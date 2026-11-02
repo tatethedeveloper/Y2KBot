@@ -59,6 +59,7 @@
       "web/**",
       "assets/**",
       "server/agents.json",
+      "server/knowledge/**",
       "package.json"
     ],
     "directories": {

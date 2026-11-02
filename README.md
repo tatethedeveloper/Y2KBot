@@ -54,6 +54,7 @@ Your settings and agent list live in the app's data folder: `%APPDATA%\Y2Kbot` o
 
 - **Default** comes from Prefs (or `RAM_PROVIDER` / `RAM_MODEL`). Each buddy can pick its own **Provider** and **Model** in Buddy Setup, so you can mix them: a cheap local model for chit-chat and a frontier model for the XP operator. Writing the model as `ollama:llama3.2` also works.
 - Anthropic uses its native API. Everything else goes through the OpenAI Chat Completions format with tool calling. Screenshots are sent as images in a follow-up message, which is the format OpenAI-compatible servers accept.
+- **XP field guide.** XP buddies have an `xp_guide` tool with a how-to guide written for agents: screen layout, Start menu, shortcuts, Notepad/Save As/Explorer/cmd recipes, Control Panel shortcuts, installing programs, pop-ups and troubleshooting. A short cheat sheet is always in their instructions, and they look up the rest by topic, which keeps prompts small for local models. To extend it for your own software, copy `server/knowledge/xp-guide.md` to `knowledge/xp-guide.md` in the app's data folder and add `## my-topic: Title` sections. The app picks up edits without a restart.
 - **Click positions.** Most models give screen positions in pixels, but Qwen3-VL answers on a 0–1000 scale. Buddy Setup → "Click positions" defaults to **Auto**, which uses 0–1000 for Qwen3-VL models and pixels for everything else. Override it there if a model's clicks consistently land in the wrong place.
 - **XP buddies need a model that can both see images and call tools.** Most frontier models can. On Ollama, use a vision + tools model such as `qwen2.5vl`, and expect small local models to struggle with clicking accurately. Text-only buddies work with any model that supports tool calling, or even ones that don't, as long as they don't need tools.
 - `<think>…</think>` blocks from local reasoning models are stripped before they reach your IM window.
@@ -138,6 +139,8 @@ server/src/memory.ts     per-buddy long-term notes
 server/src/web.ts        web_fetch (HTML→text, private-address guard) + web_search (Brave/Tavily/SearXNG)
 server/src/files.ts      attachments: text/PDF/DOCX extraction, images for vision models
 server/src/mcp.ts        MCP client: stdio + HTTP/SSE servers from mcp.json
+server/src/knowledge.ts  topic lookup for agent guides (xp_guide tool)
+server/knowledge/        xp-guide.md: the Windows XP field guide XP buddies can consult
 server/src/vm/           QEMU lifecycle, QMP over TCP, screenshots, keyboard/mouse
 server/agents.json       the starter agent list (copied to your data folder on first run)
 web/                     the retro UI; each page renders one window (?view=buddylist|im|viewer|…)

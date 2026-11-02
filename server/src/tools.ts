@@ -6,6 +6,7 @@ import type { MemoryStore } from "./memory.js";
 import type { AttachmentStore } from "./files.js";
 import { READ_CHARS } from "./files.js";
 import type { McpManager } from "./mcp.js";
+import type { Guide } from "./knowledge.js";
 import { webFetch, webSearch, searchReady, PAGE_CHARS, type SearchConfig } from "./web.js";
 import { readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -24,6 +25,7 @@ export interface ToolCtx {
   /** IM window or "#room" the buddy is working in (where its attachments live) */
   window: string;
   coordMode: CoordMode;
+  guide: Guide;
   depth: number;
   imBuddy: (to: string, text: string) => Promise<string>;
 }
@@ -54,6 +56,15 @@ const xpTools = (m: CoordMode): Anthropic.Tool[] => {
     const props = Object.fromEntries(Object.entries((t.input_schema as any).properties).map(([k, v]) => [k, /^(x|y)\d?$/.test(k) ? c : v]));
     return { ...t, description: `${t.description} ${coordHelp(m)}`, input_schema: { ...(t.input_schema as any), properties: props } };
   });
+};
+
+const XP_GUIDE: Anthropic.Tool = {
+  name: "xp_guide",
+  description:
+    "Look up how to do something on Windows XP: a short field guide written for agents like you. Call it with a topic id " +
+    "(quickstart, layout, start-menu, keyboard, files-and-paths, notepad, save-dialog, explorer, cmd, control-panel, install, popups, apps, troubleshooting, shared-drive) " +
+    "or a few words (e.g. \"save as png in paint\"). Call it with no topic for the list. Check it BEFORE improvising when you're unsure how XP does something, and after a step fails.",
+  input_schema: { type: "object", properties: { topic: { type: "string" } } },
 };
 
 const XP_TOOLS_BASE: Anthropic.Tool[] = [
@@ -186,7 +197,7 @@ export function toolsFor(
   const tools: Anthropic.Tool[] = [READ_FILE];
   if (hasWeb(agent)) { if (searchReady(opts.search)) tools.push(WEB_SEARCH); tools.push(WEB_FETCH); }
   tools.push(...opts.mcp.toolsFor(agent.mcp));
-  if (agent.capabilities.xp) tools.push(...xpTools(opts.coordMode));
+  if (agent.capabilities.xp) tools.push(XP_GUIDE, ...xpTools(opts.coordMode));
   if (agent.capabilities.xp && opts.shared) tools.push(...SHARED_TOOLS);
   if (hasMemory(agent)) tools.push(...MEMORY_TOOLS);
   if (opts.room) return tools; // no side-channel IMs from inside a chat room
@@ -268,6 +279,15 @@ export async function runTool(name: string, input: any, ctx: ToolCtx): Promise<T
         const chunk = text.slice(off, off + READ_CHARS);
         const end = off + chunk.length;
         return { content: `${input.name}: characters ${off}-${end} of ${text.length}.${end < text.length ? ` Call again with offset ${end} for more.` : ""}\n\n${chunk}`, status: `read ${input.name}` };
+      }
+      case "xp_guide": {
+        const topic = String(input.topic ?? "").trim();
+        const list = ctx.guide.topics();
+        if (!list.length) return { content: "The XP guide isn't available.", isError: true, status: "couldn't find the XP guide" };
+        if (!topic) return { content: "Topics:\n" + list.map((t) => `- ${t.id}: ${t.title}`).join("\n") + "\n\nCall xp_guide again with a topic id.", status: "opened the XP guide" };
+        const hits = ctx.guide.lookup(topic);
+        if (!hits.length) return { content: `No guide section matches "${topic}". Topics: ${list.map((t) => t.id).join(", ")}`, status: "looked in the XP guide" };
+        return { content: hits.map((t) => `# ${t.title}\n\n${t.body}`).join("\n\n---\n\n"), status: `read the XP guide: ${hits[0].id}` };
       }
       case "xp_boot": {
         const vm = await ctx.vms.boot(me);

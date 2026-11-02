@@ -14,6 +14,7 @@ import { Rooms } from "./rooms.js";
 import { AttachmentStore } from "./files.js";
 import { McpManager } from "./mcp.js";
 import { searchReady, type SearchConfig } from "./web.js";
+import { xpGuide } from "./knowledge.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // Works both from server/src (tsx) and from dist/ (compiled, inside the desktop app).
@@ -108,7 +109,7 @@ export async function startServer(opts: StartOptions = {}) {
     },
   };
 
-  const runner = new Runner(store, vms, bus, providers, { provider: PROVIDER, model: MODEL }, memory, { files, mcp, web: webCfg });
+  const runner = new Runner(store, vms, bus, providers, { provider: PROVIDER, model: MODEL }, memory, { files, mcp, web: webCfg, guide: xpGuide(projectRoot, dataDir) });
   mcp.on("changed", () => { broadcast({ type: "mcp", servers: mcp.status() }); broadcast(buddyList()); });
   mcp.connectAll().catch((e) => console.error("MCP:", (e as Error).message));
   const rooms = new Rooms(runner, store, {

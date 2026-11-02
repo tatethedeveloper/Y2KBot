@@ -7,6 +7,7 @@ import type { MemoryStore } from "./memory.js";
 import type { AttachmentStore } from "./files.js";
 import type { McpManager } from "./mcp.js";
 import type { SearchConfig } from "./web.js";
+import type { Guide } from "./knowledge.js";
 import { searchReady } from "./web.js";
 import { runTool, toolsFor, hasMemory, hasWeb, coordModeFor } from "./tools.js";
 
@@ -19,6 +20,7 @@ export interface Extras {
   files: AttachmentStore;
   mcp: McpManager;
   web: () => { search: SearchConfig; allowPrivate: boolean };
+  guide: Guide;
 }
 
 export interface Bus {
@@ -126,11 +128,13 @@ export class Runner {
       parts.push(
         [
           "You can boot your own disposable Windows XP virtual machine with the xp_* tools and operate it like a person: look at the screenshot, act, look again. It has no internet unless the operator enabled it, and it is wiped on shutdown.",
-          "How to work well on XP:",
+          "How to work well on XP (xp_guide has a full field guide by topic: quickstart, notepad, save-dialog, explorer, cmd, control-panel, install, popups, troubleshooting... Look things up there instead of guessing):",
           "- It's an emulated, SLOW machine. Every action returns a screenshot once the screen stops changing. If the thing you expected hasn't appeared, xp_wait a few seconds. Never just repeat the click or keypress, or you'll open things twice.",
           "- Prefer the keyboard over the mouse. Open things with xp_run (Start → Run): \"notepad\", \"cmd\", \"explorer C:\\\", \"control\", \"mspaint\", \"wordpad\", \"calc\". Enter = default button, Esc = cancel, Tab/Shift+Tab move between fields, Alt+F4 closes a window, Alt opens the menu bar, Ctrl+S saves.",
           "- Make a text file: xp_run \"notepad C:\\notes.txt\" → it asks \"Do you want to create a new file?\" → press enter → xp_type the text → ctrl+s → alt+f4. One-liners are even quicker: xp_run \"cmd /c echo hello world> C:\\hello.txt\". Use full paths (C:\\..., D:\\ for the shared drive). The desktop is C:\\Documents and Settings\\<user>\\Desktop (check the user name in the Start menu).",
           "- Before typing, make sure the right window has focus (its title bar is bright blue). Click inside it first if unsure.",
+          "- Underlined letters are shortcuts: alt+f opens File, alt+y clicks Yes, alt+n clicks No. Maximise windows (double-click the title bar) so targets are bigger.",
+          "- In Save As / Open dialogs, don't browse: select all in \"File name:\" and type the full path (e.g. C:\\work\\report.txt), then press enter.",
           "- Check the screenshot after each step and confirm the result (e.g. open the folder or run \"cmd /c dir C:\\ & pause\"). Don't claim success you haven't seen.",
           "- Clicks: aim for the middle of buttons and icons. Double-click opens desktop icons and files. A red crosshair in screenshots marks where your mouse pointer is.",
           coordModeFor(agent, this.safeModel(agent)) === "norm1000"
@@ -229,7 +233,7 @@ export class Runner {
           this.bus.typing(window, name, false);
           const out = await runTool(b.name, b.input, {
             agent, vms: this.vms, store: this.store, memory: this.memory, depth: o.depth,
-            files: this.extras.files, mcp: this.extras.mcp, web, window: o.window, coordMode,
+            files: this.extras.files, mcp: this.extras.mcp, web, window: o.window, coordMode, guide: this.extras.guide,
             imBuddy: async (other, msg) => {
               this.bus.im(window, name, msg, { relayTo: other });
               return this.send(other, msg, name, o.depth + 1);

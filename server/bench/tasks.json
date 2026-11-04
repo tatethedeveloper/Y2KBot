@@ -1,0 +1,424 @@
+{
+  "name": "Y2Kbench",
+  "version": 1,
+  "about": "Windows XP tasks for measuring how well an agent drives the XP machine. Every task starts on a fresh machine with an empty C:\\work folder. Checks run inside XP after the agent finishes (via a batch file on the shared drive) or look at the agent's reply.",
+  "words": [
+    "pineapple",
+    "marmalade",
+    "saxophone",
+    "lighthouse",
+    "chameleon",
+    "nebula",
+    "tangerine",
+    "origami",
+    "walrus",
+    "kaleidoscope"
+  ],
+  "tasks": [
+    {
+      "id": "make-file",
+      "title": "Create a text file",
+      "level": "easy",
+      "prompt": "Create a text file at C:\\work\\hello.txt containing exactly this text: Hello from Y2Kbot",
+      "checks": [
+        {
+          "label": "file has the text",
+          "probe": "type C:\\work\\hello.txt",
+          "expect": {
+            "contains": "Hello from Y2Kbot"
+          }
+        }
+      ]
+    },
+    {
+      "id": "make-folder",
+      "title": "Create a folder",
+      "level": "easy",
+      "prompt": "Create a new folder called reports inside C:\\work.",
+      "checks": [
+        {
+          "label": "folder exists",
+          "probe": "if exist C:\\work\\reports\\NUL (echo FOUND) else (echo MISSING)",
+          "expect": {
+            "equals": "FOUND"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rename-file",
+      "title": "Rename a file",
+      "level": "easy",
+      "prompt": "Rename the file C:\\work\\draft.txt to final.txt (keep it in the same folder).",
+      "checks": [
+        {
+          "label": "final.txt exists",
+          "probe": "if exist C:\\work\\final.txt (echo FOUND) else (echo MISSING)",
+          "expect": {
+            "equals": "FOUND"
+          }
+        },
+        {
+          "label": "draft.txt is gone",
+          "probe": "if exist C:\\work\\draft.txt (echo FOUND) else (echo MISSING)",
+          "expect": {
+            "equals": "MISSING"
+          }
+        }
+      ],
+      "setup": {
+        "xp": [
+          "echo first draft> C:\\work\\draft.txt"
+        ]
+      }
+    },
+    {
+      "id": "rename-folder",
+      "title": "Rename a folder",
+      "level": "easy",
+      "prompt": "Rename the folder C:\\work\\old_projects to archive_2003.",
+      "checks": [
+        {
+          "label": "new name exists",
+          "probe": "if exist C:\\work\\archive_2003\\NUL (echo FOUND) else (echo MISSING)",
+          "expect": {
+            "equals": "FOUND"
+          }
+        },
+        {
+          "label": "old name is gone",
+          "probe": "if exist C:\\work\\old_projects\\NUL (echo FOUND) else (echo MISSING)",
+          "expect": {
+            "equals": "MISSING"
+          }
+        },
+        {
+          "label": "contents kept",
+          "probe": "if exist C:\\work\\archive_2003\\notes.txt (echo FOUND) else (echo MISSING)",
+          "expect": {
+            "equals": "FOUND"
+          }
+        }
+      ],
+      "setup": {
+        "xp": [
+          "md C:\\work\\old_projects",
+          "echo keep me> C:\\work\\old_projects\\notes.txt"
+        ]
+      }
+    },
+    {
+      "id": "delete-file",
+      "title": "Delete one file",
+      "level": "easy",
+      "prompt": "Delete the file C:\\work\\junk.txt. Leave every other file alone.",
+      "checks": [
+        {
+          "label": "junk.txt deleted",
+          "probe": "if exist C:\\work\\junk.txt (echo FOUND) else (echo MISSING)",
+          "expect": {
+            "equals": "MISSING"
+          }
+        },
+        {
+          "label": "keep.txt untouched",
+          "probe": "if exist C:\\work\\keep.txt (echo FOUND) else (echo MISSING)",
+          "expect": {
+            "equals": "FOUND"
+          }
+        }
+      ],
+      "setup": {
+        "xp": [
+          "echo delete me> C:\\work\\junk.txt",
+          "echo keep me> C:\\work\\keep.txt"
+        ]
+      }
+    },
+    {
+      "id": "move-file",
+      "title": "Move a file",
+      "level": "easy",
+      "prompt": "Move invoice.txt from the folder C:\\work\\inbox into the folder C:\\work\\done.",
+      "checks": [
+        {
+          "label": "in done",
+          "probe": "if exist C:\\work\\done\\invoice.txt (echo FOUND) else (echo MISSING)",
+          "expect": {
+            "equals": "FOUND"
+          }
+        },
+        {
+          "label": "not in inbox",
+          "probe": "if exist C:\\work\\inbox\\invoice.txt (echo FOUND) else (echo MISSING)",
+          "expect": {
+            "equals": "MISSING"
+          }
+        }
+      ],
+      "setup": {
+        "xp": [
+          "md C:\\work\\inbox",
+          "md C:\\work\\done",
+          "echo Invoice 0042> C:\\work\\inbox\\invoice.txt"
+        ]
+      }
+    },
+    {
+      "id": "calculator",
+      "title": "Use Calculator",
+      "level": "easy",
+      "prompt": "Use the Windows Calculator on the XP machine to work out 1234 multiplied by 5678, then tell me the answer.",
+      "checks": [
+        {
+          "label": "correct answer in reply",
+          "reply": {
+            "regex": "7[,. ]?006[,. ]?652"
+          }
+        }
+      ]
+    },
+    {
+      "id": "computer-name",
+      "title": "Find the computer name",
+      "level": "easy",
+      "prompt": "What is the name of this XP computer? Find it on the machine and tell me exactly.",
+      "checks": [
+        {
+          "label": "reply has the real name",
+          "probe": "echo %COMPUTERNAME%",
+          "matchReply": true
+        }
+      ]
+    },
+    {
+      "id": "multiline-file",
+      "title": "Write a multi-line file",
+      "level": "medium",
+      "prompt": "Create C:\\work\\fruit.txt with three lines, in this order: apple, banana, cherry (one word per line, nothing else).",
+      "checks": [
+        {
+          "label": "three lines in order",
+          "probe": "type C:\\work\\fruit.txt",
+          "expect": {
+            "regex": "^\\s*apple\\s*\\r?\\n\\s*banana\\s*\\r?\\n\\s*cherry\\s*$"
+          }
+        }
+      ]
+    },
+    {
+      "id": "append-line",
+      "title": "Add a line to a file",
+      "level": "medium",
+      "prompt": "Open C:\\work\\shopping.txt and add a new last line that says: milk. Keep the existing lines exactly as they are, and save it.",
+      "checks": [
+        {
+          "label": "old lines kept, milk added last",
+          "probe": "type C:\\work\\shopping.txt",
+          "expect": {
+            "regex": "eggs\\s*\\r?\\n\\s*bread\\s*\\r?\\n\\s*milk\\s*$"
+          }
+        }
+      ],
+      "setup": {
+        "xp": [
+          "(echo eggs& echo bread)> C:\\work\\shopping.txt"
+        ]
+      }
+    },
+    {
+      "id": "replace-word",
+      "title": "Find and replace in a file",
+      "level": "medium",
+      "prompt": "In the file C:\\work\\pets.txt, change every 'cat' to 'dog', then save the file.",
+      "checks": [
+        {
+          "label": "words replaced",
+          "probe": "type C:\\work\\pets.txt",
+          "expect": {
+            "contains": "The dog sat next to the dog flap.",
+            "notContains": "cat"
+          }
+        }
+      ],
+      "setup": {
+        "xp": [
+          "echo The cat sat next to the cat flap.> C:\\work\\pets.txt"
+        ]
+      }
+    },
+    {
+      "id": "copy-to-shared",
+      "title": "Copy a file to the shared drive",
+      "level": "medium",
+      "prompt": "Copy C:\\work\\report.txt onto the shared drive ({{share}}) so that I can pick it up.",
+      "checks": [
+        {
+          "label": "report.txt reached the shared folder",
+          "sharedFile": "report.txt",
+          "expect": {
+            "contains": "Quarterly total: 42 widgets"
+          }
+        }
+      ],
+      "setup": {
+        "xp": [
+          "echo Quarterly total: 42 widgets> C:\\work\\report.txt"
+        ]
+      }
+    },
+    {
+      "id": "read-shared",
+      "title": "Read a file from the shared drive",
+      "level": "medium",
+      "prompt": "There's a file called input.txt on the shared drive. Open it on the XP machine and tell me the secret word written inside.",
+      "checks": [
+        {
+          "label": "reply has the secret word",
+          "reply": {
+            "contains": "{{word}}"
+          }
+        }
+      ],
+      "setup": {
+        "shared": {
+          "input.txt": "The secret word is {{word}}.\r\n"
+        }
+      }
+    },
+    {
+      "id": "wordpad-doc",
+      "title": "Save a WordPad document",
+      "level": "medium",
+      "prompt": "Use WordPad to write a document containing this sentence: Dear Sir, thank you for your letter. Save it as C:\\work\\letter.rtf",
+      "checks": [
+        {
+          "label": "letter.rtf has the sentence",
+          "probe": "type C:\\work\\letter.rtf",
+          "expect": {
+            "contains": "thank you for your letter"
+          }
+        }
+      ]
+    },
+    {
+      "id": "paint-picture",
+      "title": "Save a Paint picture",
+      "level": "medium",
+      "prompt": "Open Paint, draw anything you like, and save the picture as C:\\work\\drawing.bmp",
+      "checks": [
+        {
+          "label": "drawing.bmp saved",
+          "probe": "if exist C:\\work\\drawing.bmp (for %%F in (C:\\work\\drawing.bmp) do echo SIZE %%~zF) else (echo MISSING)",
+          "expect": {
+            "regex": "^SIZE [1-9]\\d*$"
+          }
+        }
+      ]
+    },
+    {
+      "id": "extract-zip",
+      "title": "Extract a zip file",
+      "level": "medium",
+      "prompt": "Extract all the files from {{share}}\\archive.zip into a new folder C:\\work\\unzipped.",
+      "checks": [
+        {
+          "label": "readme.txt extracted",
+          "probe": "dir /s /b C:\\work\\unzipped",
+          "expect": {
+            "contains": [
+              "readme.txt",
+              "data.csv"
+            ]
+          }
+        }
+      ],
+      "setup": {
+        "shared": {
+          "archive.zip": "@fixture:archive.zip"
+        }
+      }
+    },
+    {
+      "id": "install-program",
+      "title": "Run an installer",
+      "level": "hard",
+      "prompt": "There's an installer on the shared drive called install.vbs. Run it and install 'Y2K Demo' to its default folder, accepting the licence.",
+      "checks": [
+        {
+          "label": "Y2K Demo installed",
+          "probe": "type \"C:\\Program Files\\Y2K Demo\\installed.txt\"",
+          "expect": {
+            "contains": "Y2K Demo installed"
+          }
+        }
+      ],
+      "setup": {
+        "shared": {
+          "install.vbs": "@fixture:install.vbs"
+        }
+      },
+      "timeoutMin": 15
+    },
+    {
+      "id": "desktop-shortcut",
+      "title": "Make a desktop shortcut",
+      "level": "hard",
+      "prompt": "Put a shortcut to Notepad on the desktop.",
+      "checks": [
+        {
+          "label": "a desktop shortcut points at Notepad",
+          "probe": "findstr /i /m notepad \"%USERPROFILE%\\Desktop\\*.lnk\"",
+          "expect": {
+            "regex": "\\.lnk"
+          }
+        }
+      ]
+    },
+    {
+      "id": "show-extensions",
+      "title": "Show file extensions",
+      "level": "hard",
+      "prompt": "Change the folder options so that file extensions (like .txt) are shown for all files.",
+      "checks": [
+        {
+          "label": "HideFileExt is 0",
+          "probe": "reg query \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced\" /v HideFileExt",
+          "expect": {
+            "regex": "HideFileExt\\s+REG_DWORD\\s+0x0\\b"
+          }
+        }
+      ]
+    },
+    {
+      "id": "screensaver",
+      "title": "Change the screen saver",
+      "level": "hard",
+      "prompt": "Set the screen saver to 3D Pipes.",
+      "checks": [
+        {
+          "label": "screen saver is 3D Pipes",
+          "probe": "reg query \"HKCU\\Control Panel\\Desktop\" /v SCRNSAVE.EXE",
+          "expect": {
+            "contains": "sspipes"
+          }
+        }
+      ]
+    },
+    {
+      "id": "wallpaper",
+      "title": "Change the wallpaper",
+      "level": "hard",
+      "prompt": "Change the desktop background to the built-in picture called Azul.",
+      "checks": [
+        {
+          "label": "background is Azul",
+          "probe": "(reg query \"HKCU\\Software\\Microsoft\\Internet Explorer\\Desktop\\General\" /v WallpaperSource & reg query \"HKCU\\Control Panel\\Desktop\" /v Wallpaper)",
+          "expect": {
+            "contains": "azul"
+          }
+        }
+      ]
+    }
+  ]
+}

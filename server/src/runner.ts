@@ -8,8 +8,10 @@ import type { AttachmentStore } from "./files.js";
 import type { McpManager } from "./mcp.js";
 import type { SearchConfig } from "./web.js";
 import type { Guide } from "./knowledge.js";
+import type { Ocr } from "./ocr.js";
+import { format as formatSkill, type SkillStore, type Skill } from "./skills.js";
 import { searchReady } from "./web.js";
-import { runTool, toolsFor, hasMemory, hasWeb, coordModeFor } from "./tools.js";
+import { runTool, toolsFor, hasMemory, hasWeb, hasXpCmd, hasSkills, coordModeFor, type ToolCtx } from "./tools.js";
 
 type Msg = Anthropic.MessageParam;
 /** What the user (or room) sends a buddy: plain text, or text plus attachment blocks. */
@@ -21,6 +23,9 @@ export interface Extras {
   mcp: McpManager;
   web: () => { search: SearchConfig; allowPrivate: boolean };
   guide: Guide;
+  ocr: Ocr;
+  skills: SkillStore;
+  approve: ToolCtx["approve"];
 }
 
 export interface Bus {
@@ -29,6 +34,8 @@ export interface Bus {
   event(window: string, text: string): void;
   typing(window: string, who: string, on: boolean): void;
   status(who: string, status: "online" | "busy"): void;
+  /** The buddy's brain is working (null) or failing (why). Drives the Away state and door sounds. */
+  presence(who: string, down: string | null): void;
 }
 
 const MAX_STEPS = 60;
@@ -41,6 +48,8 @@ interface TurnOpts {
   from: string;            // "user", another buddy's name, or "room"
   depth: number;
   room?: { name: string; members: string[]; me: string };
+  /** saved skills that look relevant to this task (picked once per turn) */
+  skills?: Skill[];
 }
 
 export class Runner {
@@ -130,12 +139,17 @@ export class Runner {
           "You can boot your own disposable Windows XP virtual machine with the xp_* tools and operate it like a person: look at the screenshot, act, look again. It has no internet unless the operator enabled it, and it is wiped on shutdown.",
           "How to work well on XP (xp_guide has a full field guide by topic: quickstart, notepad, save-dialog, explorer, cmd, control-panel, install, popups, troubleshooting... Look things up there instead of guessing):",
           "- It's an emulated, SLOW machine. Every action returns a screenshot once the screen stops changing. If the thing you expected hasn't appeared, xp_wait a few seconds. Never just repeat the click or keypress, or you'll open things twice.",
+          ...(hasXpCmd(agent) ? [
+            "- For files, folders and settings, use xp_cmd: it runs a command line inside XP and gives you the output as text, in one step. Create, rename, move, copy, delete, read (type), list (dir), registry (reg add), computer name (hostname). Then check the result with another xp_cmd (dir, type) rather than a screenshot. Use the GUI for things only the GUI can do (drawing in Paint, clicking through an installer, display settings dialogs) and to look at visual results.",
+          ] : []),
+          "- Before anything risky or hard to undo (installing, deleting, system settings, registry), call xp_checkpoint. If it goes wrong, xp_undo puts the machine back instead of you repairing it by hand.",
           "- Prefer the keyboard over the mouse. Open things with xp_run (Start → Run): \"notepad\", \"cmd\", \"explorer C:\\\", \"control\", \"mspaint\", \"wordpad\", \"calc\". Enter = default button, Esc = cancel, Tab/Shift+Tab move between fields, Alt+F4 closes a window, Alt opens the menu bar, Ctrl+S saves.",
           "- Make a text file: xp_run \"notepad C:\\notes.txt\" → it asks \"Do you want to create a new file?\" → press enter → xp_type the text → ctrl+s → alt+f4. One-liners are even quicker: xp_run \"cmd /c echo hello world> C:\\hello.txt\". Use full paths (C:\\..., D:\\ for the shared drive). The desktop is C:\\Documents and Settings\\<user>\\Desktop (check the user name in the Start menu).",
           "- Before typing, make sure the right window has focus (its title bar is bright blue). Click inside it first if unsure.",
           "- Underlined letters are shortcuts: alt+f opens File, alt+y clicks Yes, alt+n clicks No. Maximise windows (double-click the title bar) so targets are bigger.",
           "- In Save As / Open dialogs, don't browse: select all in \"File name:\" and type the full path (e.g. C:\\work\\report.txt), then press enter.",
           "- Check the screenshot after each step and confirm the result (e.g. open the folder or run \"cmd /c dir C:\\ & pause\"). Don't claim success you haven't seen.",
+          "- To click anything with words on it (buttons, menus, menu items, tabs, icon labels), use xp_click_text(\"Save\"). It finds the label on screen for you, which is far more reliable than guessing coordinates. Use xp_read_screen to see all the text on screen (great for reading dialogs and error messages). Keep xp_click for things without a label.",
           "- Clicks: aim for the middle of buttons and icons. Double-click opens desktop icons and files. A red crosshair in screenshots marks where your mouse pointer is.",
           coordModeFor(agent, this.safeModel(agent)) === "norm1000"
             ? "- Screen positions use a 0–1000 scale in both directions: (0,0) top-left, (500,500) the centre, (1000,1000) bottom-right. Never use raw pixel numbers."
@@ -145,8 +159,8 @@ export class Runner {
       );
       if (this.vms.sharedDir(agent.screenName)) {
         parts.push(
-          "Your shared folder is attached to XP as an extra drive (usually D:, check My Computer). It's the way files get in and out: whatever is in the folder at boot shows up on that drive, " +
-            "and anything you save to that drive inside XP lands in the folder on the user's computer. Files the user drops into the chat go there too. " +
+          "Your shared folder is attached to XP as an extra drive (its volume label is QEMU VVFAT; it's usually D: or E:. xp_cmd 'vol D: & vol E:' shows which, or look in My Computer). It's the way files get in and out: " +
+            "anything you save to that drive inside XP lands in the folder on the user's computer, and files the user drops into the chat go there too. shared_write can add a file even while XP is running. " +
             "After saving to the shared drive inside XP, wait a few seconds before shutting down so Windows finishes writing. Use shared_files / shared_read / shared_write from outside XP.",
         );
       }
@@ -167,8 +181,22 @@ export class Runner {
           `<memory>\n${notes || "(no notes yet)"}\n</memory>`,
       );
     }
-    if (this.vms.has(agent.screenName)) parts.push("Your XP machine is currently running.");
+    if (hasSkills(agent)) {
+      parts.push(
+        "Skills: a library of recipes that worked, shared by all buddies. Use skill_search before something you're unsure how to do. After you finish a multi-step task and have checked it worked, save the recipe with skill_save (the steps that worked, not the dead ends), or improve an existing skill that was wrong or slow.",
+      );
+      if (o.skills?.length) parts.push(`Saved skills that may help with this task (check they fit before following them):\n<skills>\n${o.skills.map(formatSkill).join("\n\n")}\n</skills>`);
+    }
+    if (this.vms.has(agent.screenName)) {
+      const cps = this.vms.checkpoints(agent.screenName);
+      parts.push(`Your XP machine is currently running.${cps.length ? ` Checkpoints you can xp_undo to: ${cps.map((c) => `"${c.label}"`).join(", ")}.` : ""}`);
+    }
     if (agent.awayMessage) parts.push(`Your away message is set to: "${agent.awayMessage}". You still answer.`);
+    if (!agent.lockVm) {
+      parts.push(agent.profile?.trim()
+        ? `Your profile (what people see in Get Info; change it with profile_set):\n<profile>\n${agent.profile.trim()}\n</profile>`
+        : "You haven't written your profile yet (what people see in Get Info). When you have a quiet moment, write one with profile_set.");
+    }
     return parts.join("\n\n");
   }
 
@@ -194,6 +222,11 @@ export class Runner {
 
     try {
       history.push({ role: "user", content: o.from === "user" || o.room ? text : `[IM from ${o.from}]: ${asText(text)}` });
+      // Hand the buddy the closest saved skills for this task (rooms are chat, so skip them)
+      if (hasSkills(agent) && !o.room) {
+        o.skills = this.extras.skills.search(asText(text), 2, 2.5);
+        this.extras.skills.used(o.skills);
+      }
 
       const { provider, model } = this.route(agent);
       if (!provider.ready && provider.id === this.defaults.provider) {
@@ -216,6 +249,7 @@ export class Runner {
           messages: history,
           signal: ac.signal,
         });
+        if (step === 0) this.bus.presence(name, null); // the brain answered: back from Away if it was
         if (!resp.content.length) resp.content.push({ type: "text", text: o.room ? "(pass)" : "(no reply)" });
         history.push({ role: "assistant", content: resp.content });
 
@@ -233,7 +267,7 @@ export class Runner {
           this.bus.typing(window, name, false);
           const out = await runTool(b.name, b.input, {
             agent, vms: this.vms, store: this.store, memory: this.memory, depth: o.depth,
-            files: this.extras.files, mcp: this.extras.mcp, web, window: o.window, coordMode, guide: this.extras.guide,
+            files: this.extras.files, mcp: this.extras.mcp, web, window: o.window, coordMode, guide: this.extras.guide, ocr: this.extras.ocr, skills: this.extras.skills, approve: this.extras.approve,
             imBuddy: async (other, msg) => {
               this.bus.im(window, name, msg, { relayTo: other });
               return this.send(other, msg, name, o.depth + 1);
@@ -253,7 +287,10 @@ export class Runner {
       history.splice(rollback);
       const msg = (e as Error).message;
       if (ac.signal.aborted || /abort/i.test(msg)) this.bus.event(window, `${name} was stopped.`);
-      else this.bus.event(window, `*** ${name} hit an error: ${msg}`);
+      else {
+        this.bus.event(window, `*** ${name} hit an error: ${msg}`);
+        this.bus.presence(name, msg); // its brain is failing: shows as Away until it works again
+      }
       return replies.filter((r) => !isPass(r)).join("\n\n") || (o.room ? "" : `(error: ${msg})`);
     } finally {
       this.aborts.delete(name);

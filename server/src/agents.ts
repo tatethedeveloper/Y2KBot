@@ -6,17 +6,21 @@ export interface Agent {
   color: string;
   profile: string;
   awayMessage: string | null;
-  /** memory defaults to on when missing */
-  capabilities: { xp: boolean; imBuddies: boolean; memory?: boolean; web?: boolean };
+  /** memory, web, xpCmd and skills default to on when missing */
+  capabilities: { xp: boolean; imBuddies: boolean; memory?: boolean; web?: boolean; xpCmd?: boolean; skills?: boolean };
   /** MCP servers this buddy may use: names from mcp.json, or "all". */
   mcp?: string[] | "all";
   /** How the model gives screen positions for XP clicks: auto (by model name), pixels, or 0–1000. */
   coords?: "auto" | "pixels" | "norm1000";
+  /** Internal (benchmark agent): its XP machine is managed for it, so it may not boot/shut down. */
+  lockVm?: boolean;
   persona: string;
   /** Provider id (anthropic, openai, ollama, openrouter, gemini, groq, lmstudio, custom). Blank = default. */
   provider?: string;
   /** Model name for that provider. Blank = default. "ollama:llama3.2" style also works. */
   model?: string;
+  /** Buddy icon: one of the avatars in web/avatars (blank = picked from the screen name). */
+  icon?: string;
 }
 
 export class AgentStore {

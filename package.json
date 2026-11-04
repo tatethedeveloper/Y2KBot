@@ -28,15 +28,17 @@
     "dist:win": "npm run build && electron-builder --win",
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:linux": "npm run build && electron-builder --linux",
-    "web": "tsx server/src/cli.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bench": "tsx server/src/bench-cli.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.60.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
+    "@tesseract.js-data/eng": "^1.0.0",
     "express": "^4.21.2",
     "mammoth": "^1.13.0",
     "pngjs": "^7.0.0",
+    "tesseract.js": "^7.0.0",
     "unpdf": "^1.9.1",
     "ws": "^8.18.0"
   },
@@ -60,6 +62,7 @@
       "assets/**",
       "server/agents.json",
       "server/knowledge/**",
+      "server/bench/**",
       "package.json"
     ],
     "directories": {
@@ -87,6 +90,11 @@
         "deb"
       ],
       "category": "Network"
-    }
+    },
+    "asarUnpack": [
+      "node_modules/tesseract.js/**",
+      "node_modules/tesseract.js-core/**",
+      "node_modules/@tesseract.js-data/**"
+    ]
   }
 }

@@ -1,20 +1,22 @@
-// Y2Kbot — client.
-// Two modes:
-//  • desktop app (window.ramNative exists): each page is ONE native window, chosen by ?view=…&arg=…
-//  • browser: everything lives on a fake XP desktop in one tab.
+// Y2Kbot — client. Runs inside the desktop app only: each page is ONE native window,
+// chosen by ?view=…&arg=…, and window.ramNative (electron/preload.cjs) is its bridge to the app.
 (() => {
   const $ = (sel, root = document) => root.querySelector(sel);
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const timeStr = (t = Date.now()) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
 
-  const NATIVE = !!window.ramNative;
+  if (!window.ramNative) {
+    // Opened in an ordinary browser: there's no web version, so say so instead of half-working.
+    document.body.innerHTML = `<div class="not-app"><img src="logo.svg" alt=""><p><b>Y2Kbot is a desktop app.</b></p><p>Open it from the Y2Kbot app (<code>npm run app</code>), not a web browser.</p></div>`;
+    return;
+  }
   const params = new URLSearchParams(location.search);
-  const VIEW = NATIVE ? params.get("view") || "signon" : null;
+  const VIEW = params.get("view") || "signon";
   const ARG = params.get("arg") || "";
-  if (NATIVE) document.body.classList.add("native", `view-${VIEW}`, `os-${window.ramNative.platform}`);
+  document.body.classList.add("native", `view-${VIEW}`, `os-${window.ramNative.platform}`);
 
-  /** In the desktop app, is (view,arg) the window this page *is*? In the browser, everything is local. */
-  const isMine = (view, arg = "") => !NATIVE || (VIEW === view && ARG === arg);
+  /** Is (view,arg) the window this page *is*? Anything else opens in its own native window. */
+  const isMine = (view, arg = "") => VIEW === view && ARG === arg;
   const remote = (view, arg = "", focus = true) => window.ramNative.open({ view, arg, focus });
 
   const state = {
@@ -41,105 +43,50 @@
     collapsed: new Set(JSON.parse(localStorage.getItem("ram.collapsed") || "[]")),
   };
 
-  // ================= window manager =================
-  let z = 10;
-  let cascade = 0;
+  // ================= window =================
+  // The page is the window: the OS handles focus, stacking, moving and the taskbar.
   const windows = new Map();
 
-  function createWindow({ id, title, x, y, w, h, cls = "", onClose, closable = true }) {
-    if (windows.has(id)) { windows.get(id).focus(); return windows.get(id); }
+  function createWindow({ id, title, cls = "", onClose, closable = true }) {
+    if (windows.has(id)) return windows.get(id);
     const el = $("#tpl-window").content.firstElementChild.cloneNode(true);
     el.classList.add(...cls.split(" ").filter(Boolean));
     $(".title", el).textContent = title;
     if (!closable) $(".tb-close", el).style.display = "none";
-    $("#desktop").appendChild(el);
-
-    if (NATIVE) {
-      // The page is the window. The OS handles focus, stacking and the taskbar.
-      document.title = title;
-      const api = {
-        id, el, body: $(".window-body", el), tbtn: null,
-        setTitle(t) { $(".title", el).textContent = t; document.title = t; },
-        focus() {}, minimize() { window.ramNative.minimize(); },
-        isFocused() { return document.hasFocus(); },
-        flash() { if (!document.hasFocus()) window.ramNative.flash(); },
-        close() { onClose?.(); window.ramNative.close(); },
-      };
-      windows.set(id, api);
-      const sync = () => el.classList.toggle("inactive", !document.hasFocus());
-      addEventListener("focus", sync); addEventListener("blur", sync); sync();
-      $(".tb-close", el).onclick = () => api.close();
-      $(".tb-min", el).onclick = () => api.minimize();
-      return api;
-    }
-
-    Object.assign(el.style, { left: x + "px", top: y + "px", width: w + "px", height: h ? h + "px" : "auto" });
-    const tbtn = document.createElement("button");
-    tbtn.className = "taskbtn";
-    tbtn.innerHTML = `<img src="logo.svg" alt=""><span></span>`;
-    $("span", tbtn).textContent = title;
-    $("#task-buttons").appendChild(tbtn);
-
+    $("#app").appendChild(el);
+    document.title = title;
     const api = {
-      id, el, body: $(".window-body", el), tbtn,
-      setTitle(t) { $(".title", el).textContent = t; $("span", tbtn).textContent = t; },
-      focus() {
-        el.classList.remove("minimized");
-        el.style.zIndex = ++z;
-        for (const o of windows.values()) {
-          const on = o === api;
-          o.el.classList.toggle("inactive", !on);
-          o.tbtn.classList.toggle("active", on);
-        }
-        tbtn.classList.remove("flash");
-      },
-      isFocused() { return !el.classList.contains("inactive") && !el.classList.contains("minimized"); },
-      minimize() { el.classList.add("minimized"); tbtn.classList.remove("active"); },
-      flash() { if (!api.isFocused()) tbtn.classList.add("flash"); },
-      close() { el.remove(); tbtn.remove(); windows.delete(id); onClose?.(); },
+      id, el, body: $(".window-body", el),
+      setTitle(t) { $(".title", el).textContent = t; document.title = t; },
+      focus() {}, minimize() { window.ramNative.minimize(); },
+      isFocused() { return document.hasFocus(); },
+      flash() { if (!document.hasFocus()) window.ramNative.flash(); },
+      close() { onClose?.(); window.ramNative.close(); },
     };
     windows.set(id, api);
-
-    $(".tb-close", el).onclick = (e) => { e.stopPropagation(); api.close(); };
-    $(".tb-min", el).onclick = (e) => { e.stopPropagation(); api.minimize(); };
-    tbtn.onclick = () => (api.isFocused() ? api.minimize() : api.focus());
-    el.addEventListener("mousedown", () => api.focus());
-
-    $(".titlebar", el).addEventListener("mousedown", (e) => {
-      if (e.target.closest(".tb")) return;
-      const sx = e.clientX - el.offsetLeft, sy = e.clientY - el.offsetTop;
-      const move = (ev) => {
-        el.style.left = Math.max(-el.offsetWidth + 60, Math.min(innerWidth - 60, ev.clientX - sx)) + "px";
-        el.style.top = Math.max(0, Math.min(innerHeight - 60, ev.clientY - sy)) + "px";
-      };
-      const up = () => { removeEventListener("mousemove", move); removeEventListener("mouseup", up); };
-      addEventListener("mousemove", move);
-      addEventListener("mouseup", up);
-    });
-
-    api.focus();
+    const sync = () => el.classList.toggle("inactive", !document.hasFocus());
+    addEventListener("focus", sync); addEventListener("blur", sync); sync();
+    $(".tb-close", el).onclick = () => api.close();
+    $(".tb-min", el).onclick = () => api.minimize();
     return api;
   }
 
   /** Native dialogs size their OS window to their content. */
   function fitToContent(win) {
-    if (!NATIVE) return;
-    win.el.classList.add("measuring");
-    requestAnimationFrame(() => {
+    // One measurement per frame, done in one go: overlapping calls used to read the window's
+    // current height instead of the content's, so dialogs never grew (Prefs got cut off).
+    cancelAnimationFrame(win.fitFrame);
+    win.fitFrame = requestAnimationFrame(() => {
+      win.el.classList.add("measuring");
       const h = win.el.offsetHeight;
       win.el.classList.remove("measuring");
       window.ramNative.fit(h);
     });
   }
 
-  function nextPos(w, h) {
-    const n = cascade++ % 8;
-    return { x: Math.max(10, Math.min(innerWidth - w - 280, 40 + n * 26)), y: Math.max(10, Math.min(innerHeight - h - 50, 30 + n * 24)) };
-  }
-
   // ================= sign on =================
   function showSignOn() {
-    const win = createWindow({ id: "signon", title: "Sign On", x: innerWidth / 2 - 120, y: Math.max(20, innerHeight / 2 - 230), w: 240, cls: "signon" });
+    const win = createWindow({ id: "signon", title: "Sign On", cls: "signon" });
     win.body.innerHTML = `
       <div class="banner"><img src="logo.svg" alt=""><div class="wordmark">Y2K<b>bot</b></div><div class="sub">AGENTS FROM THE MILLENNIUM</div></div>
       <div class="form">
@@ -151,7 +98,7 @@
         <label class="row"><input type="checkbox" checked disabled> Save password</label>
         <label class="row"><input type="checkbox" class="snd" checked> Play sounds</label>
         <div class="bottom">
-          <button class="xp help">${NATIVE ? "Setup" : "Help"}</button>
+          <button class="xp help">Setup</button>
           <button class="xp go"><b>Sign On</b></button>
         </div>
         <div class="status"></div>
@@ -160,7 +107,7 @@
     sn.value = state.me;
     $(".snd", win.body).checked = localStorage.getItem("ram.muted") !== "1";
     $(".getsn", win.body).onclick = () => { sn.value = ["xX_", "sk8r", "l33t", "ninja"][Math.floor(Math.random() * 4)] + Math.floor(Math.random() * 900 + 100); };
-    $(".help", win.body).onclick = () => (NATIVE ? openPrefs() : openHelp());
+    $(".help", win.body).onclick = () => openPrefs();
     const go = () => {
       state.me = sn.value.trim() || "Me";
       localStorage.setItem("ram.sn", state.me);
@@ -169,10 +116,7 @@
       $(".go", win.body).disabled = true;
       const steps = ["1. Connecting...", "2. Verifying screen name...", "3. Starting agents..."];
       steps.forEach((s, i) => setTimeout(() => (status.textContent = s), i * 380));
-      setTimeout(() => connect(() => {
-        if (NATIVE) window.ramNative.signedOn();
-        else { win.close(); showBuddyList(); }
-      }), steps.length * 380);
+      setTimeout(() => connect(() => window.ramNative.signedOn()), steps.length * 380);
     };
     $(".go", win.body).onclick = go;
     sn.addEventListener("keydown", (e) => e.key === "Enter" && go());
@@ -182,15 +126,14 @@
 
   // ================= socket =================
   function connect(onReady) {
-    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+    const ws = new WebSocket(`ws://${location.host}/ws`);
     state.ws = ws;
     let ready = false;
     ws.onopen = () => {
-      $("#tray-conn").classList.add("on");
+      if (state.me) send({ type: "iam", name: state.me });
       for (const name of state.ims.keys()) send({ type: "history", window: name });
     };
     ws.onclose = () => {
-      $("#tray-conn").classList.remove("on");
       for (const im of state.ims.values()) addEvent(im, "*** Connection lost. Reconnecting...", true);
       setTimeout(() => connect(), 2000);
     };
@@ -202,14 +145,149 @@
   }
   const send = (m) => state.ws?.readyState === 1 && state.ws.send(JSON.stringify(m));
 
+  /** Send a message and wait for the reply that carries the same reqId. */
+  const waiters = new Map();
+  function request(m, timeoutMs = 30000) {
+    const reqId = Math.random().toString(36).slice(2);
+    return new Promise((resolve, reject) => {
+      if (state.ws?.readyState !== 1) return reject(new Error("Not connected to Y2Kbot."));
+      waiters.set(reqId, resolve);
+      send({ ...m, reqId });
+      setTimeout(() => { if (waiters.delete(reqId)) reject(new Error("Y2Kbot didn't answer in time.")); }, timeoutMs);
+    });
+  }
+
+  // ================= buddy icons + presence =================
+  const AVATARS = ["robot", "globe", "monitor", "floppy", "cat", "rocket", "bulb", "ghost", "alien", "sun", "note", "mug"];
+  const hashName = (s) => [...String(s)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7);
+  const iconOf = (b) => (AVATARS.includes(b?.icon) ? b.icon : AVATARS[hashName(b?.screenName || "") % AVATARS.length]);
+  const avatarUrl = (b) => `avatars/${iconOf(b)}.svg`;
+  const IDLE_MS = 5 * 60000;
+  const fmtIdle = (min) => (min < 60 ? `${min}m` : `${Math.floor(min / 60)}h${min % 60 ? ` ${min % 60}m` : ""}`);
+  /** online | busy | idle | away, and why. */
+  function presenceOf(b) {
+    if (!b) return { state: "away", why: "not on your list" };
+    if (b.busy) return { state: "busy" };
+    if (b.down) return { state: "away", why: `brain isn't answering (${b.down})`, crashed: true };
+    if (b.route && !b.route.ready && !state.demoMode) return { state: "away", why: `${b.route.label} isn't set up`, crashed: true };
+    if (b.awayMessage) return { state: "away", why: b.awayMessage };
+    const idle = Math.floor((Date.now() - (b.idleSince || Date.now())) / 60000);
+    if (idle * 60000 >= IDLE_MS) return { state: "idle", idle };
+    return { state: "online" };
+  }
+
+  // ================= XP menus =================
+  // menus: { "File": () => [ { label, key?, disabled?, action } | "-" ] }
+  let openMenu = null;
+  function closeMenu() {
+    if (!openMenu) return;
+    openMenu.el.remove(); openMenu.span.classList.remove("open");
+    openMenu = null;
+  }
+  addEventListener("mousedown", (e) => { if (openMenu && !e.target.closest(".xpmenu, .menubar span")) closeMenu(); });
+  addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+  addEventListener("blur", closeMenu);
+  function showMenu(span, items) {
+    closeMenu();
+    const el = document.createElement("div");
+    el.className = "xpmenu";
+    for (const it of items()) {
+      if (it === "-") { el.appendChild(Object.assign(document.createElement("div"), { className: "sep" })); continue; }
+      if (!it) continue;
+      const row = document.createElement("div");
+      row.className = "item" + (it.disabled ? " disabled" : "");
+      row.innerHTML = `<span class="lbl"></span><span class="key"></span>`;
+      $(".lbl", row).textContent = it.label;
+      $(".key", row).textContent = it.key || "";
+      if (!it.disabled) row.onclick = () => { closeMenu(); it.action(); };
+      el.appendChild(row);
+    }
+    document.body.appendChild(el);
+    const r = span.getBoundingClientRect();
+    el.style.left = Math.max(0, Math.min(r.left, innerWidth - el.offsetWidth - 2)) + "px";
+    el.style.top = r.bottom + "px";
+    span.classList.add("open");
+    openMenu = { el, span };
+  }
+  function attachMenus(bar, menus) {
+    bar.querySelectorAll("span").forEach((span) => {
+      const items = menus[span.textContent.trim()];
+      if (!items) return;
+      span.classList.add("has-menu");
+      span.onmousedown = (e) => { e.preventDefault(); openMenu?.span === span ? closeMenu() : showMenu(span, items); };
+      span.onmouseenter = () => { if (openMenu && openMenu.span !== span) showMenu(span, items); }; // slide across open menus
+    });
+  }
+
+  /** An XP-style message box inside the current window. Resolves with the button pressed. */
+  function xpAlert(title, html, { icon = "info", buttons = ["OK"] } = {}) {
+    return new Promise((resolve) => {
+      const veil = document.createElement("div");
+      veil.className = "xpmsg-veil";
+      veil.innerHTML = `<div class="xpmsg"><div class="titlebar"><span class="title"></span></div>
+        <div class="xpmsg-body"><img src="icons/${icon}.svg" alt="" width="32" height="32"><div class="xpmsg-text">${html}</div></div>
+        <div class="xpmsg-btns"></div></div>`;
+      $(".title", veil).textContent = title;
+      for (const [i, label] of buttons.entries()) {
+        const b = Object.assign(document.createElement("button"), { className: "xp", textContent: label });
+        b.onclick = () => { veil.remove(); resolve(label); };
+        $(".xpmsg-btns", veil).appendChild(b);
+        if (i === 0) setTimeout(() => b.focus(), 0);
+      }
+      document.body.appendChild(veil);
+    });
+  }
+
+  /** Ask the app for a conversation log and save it where the user picks. */
+  async function saveConversation(win, format) {
+    try {
+      const r = await request({ type: "log_get", window: win, format });
+      const stamp = new Date().toISOString().slice(0, 10);
+      const name = `${win.replace(/^#/, "room ")} ${stamp}.${format === "html" ? "html" : "txt"}`;
+      const filters = format === "html" ? [{ name: "Web page", extensions: ["html"] }] : [{ name: "Text file", extensions: ["txt"] }];
+      const saved = await window.ramNative.saveText({ defaultName: name, filters, text: r.text });
+      const im = state.ims.get(win);
+      if (saved && im) addEvent(im, `Conversation saved to ${saved}`);
+    } catch (e) { xpAlert("Save Conversation", esc(e.message), { icon: "warn" }); }
+  }
+
+  async function exportBuddy(name, withMemory = false) {
+    try {
+      const r = await request({ type: "buddy_export", who: name, withMemory });
+      const saved = await window.ramNative.saveText({ defaultName: r.name, filters: [{ name: "Y2Kbot buddy", extensions: ["y2kbuddy"] }], text: r.text });
+      if (saved) xpAlert("Export Buddy", `Saved <b>${esc(name)}</b>${withMemory ? " with its memory notes" : ""} to<br><code>${esc(saved)}</code><br><br>Anyone with Y2Kbot can import it. It contains no API keys.`);
+    } catch (e) { xpAlert("Export Buddy", esc(e.message), { icon: "warn" }); }
+  }
+
+  async function importBuddy() {
+    try {
+      const f = await window.ramNative.openText({ title: "Import a buddy", filters: [{ name: "Y2Kbot buddy", extensions: ["y2kbuddy", "json"] }] });
+      if (!f) return;
+      const r = await request({ type: "buddy_import", text: f.text });
+      if (r.error) return xpAlert("Import Buddy", esc(r.error), { icon: "warn" });
+      state.selected = r.screenName; localStorage.setItem("ram.selected", r.screenName);
+      xpAlert("Import Buddy", `<b>${esc(r.screenName)}</b> is on your agent list${r.withMemory ? ", with its memory notes" : ""}.` +
+        (r.notes.length ? `<ul>${r.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""), { icon: "add" });
+      Sounds.signOn();
+    } catch (e) { xpAlert("Import Buddy", esc(e.message), { icon: "warn" }); }
+  }
+
   const viewFor = (win) => (win.startsWith("#") ? "room" : "im");
   const openConvo = (win, opts) => (win.startsWith("#") ? openRoom(win, opts) : openIM(win, opts));
 
-  /** In the desktop app, the agent list window is the "router" that pops open IM windows. */
-  const isRouter = () => !NATIVE || VIEW === "buddylist";
+  /** The agent list window is the "router" that pops open IM windows. */
+  const isRouter = () => VIEW === "buddylist";
 
   function handle(m) {
+    if (m.reqId && waiters.has(m.reqId)) { waiters.get(m.reqId)(m); waiters.delete(m.reqId); return; }
     switch (m.type) {
+      case "approve_request":
+        if (VIEW === "approve" && ARG === m.id) renderApprove(m);
+        else if (isRouter()) { Sounds.warn(); remote("approve", m.id); }
+        break;
+      case "approve_done":
+        if (VIEW === "approve" && ARG === m.id) { state.approveDone = true; window.ramNative.close(); }
+        break;
       case "hello":
         state.web = m.web || null;
         state.model = m.model; state.provider = m.provider; state.providers = m.providers || []; state.demoMode = m.demoMode; state.xp = m.xp;
@@ -217,10 +295,14 @@
         break;
       case "buddies": {
         const names = new Set(m.buddies.map((b) => b.screenName));
+        // door sounds: a buddy arriving or recovering signs on; one leaving or crashing signs off
+        const crashed = new Map(m.buddies.map((b) => [b.screenName, !!presenceOf(b).crashed]));
         if (state.known && isRouter()) {
-          if ([...names].some((n) => !state.known.has(n))) Sounds.signOn();
-          if ([...state.known].some((n) => !names.has(n))) Sounds.signOff();
+          const arrived = [...names].some((n) => !state.known.has(n)) || [...crashed].some(([n, c]) => !c && state.crashed?.get(n));
+          const left = [...state.known].some((n) => !names.has(n)) || [...crashed].some(([n, c]) => c && state.crashed?.has(n) && !state.crashed.get(n));
+          if (left) Sounds.signOff(); else if (arrived) Sounds.signOn();
         }
+        state.crashed = crashed;
         state.known = names;
         state.buddies = m.buddies;
         renderBuddyList();
@@ -232,12 +314,11 @@
         const incoming = m.type === "im" && m.from !== "You" && !m.relayTo;
         if (!isMine(viewFor(m.window), m.window)) {
           // Not this window's conversation: the router opens (or flashes) the right IM/room window.
-          if (NATIVE && VIEW === "buddylist") { remote(viewFor(m.window), m.window, false); if (incoming) Sounds.imIn(); }
+          if (VIEW === "buddylist") { remote(viewFor(m.window), m.window, false); if (incoming) Sounds.imIn(); }
           break;
         }
         const im = openConvo(m.window, { noFocus: true });
         drawItem(im, m, { live: true });
-        if (incoming && !NATIVE) Sounds.imIn();
         break;
       }
       case "history": {
@@ -255,7 +336,7 @@
         if (m.clientId && m.clientId === state.pendingRoom) {
           state.pendingRoom = null;
           openRoom(m.room);
-          if (NATIVE && VIEW === "invite") window.ramNative.close();
+          if (VIEW === "invite") window.ramNative.close();
           else windows.get("invite")?.close();
         }
         break;
@@ -284,6 +365,44 @@
         modelWaiters.delete(m.provider);
         break;
       }
+      case "bench_tasks": case "bench_history": case "bench_progress": case "bench_finished": case "bench_error": case "bench_markdown":
+        benchHandle(m);
+        break;
+      case "skills":
+        state.skills = m.skills;
+        state.onSkills?.();
+        break;
+      case "skill_error":
+        state.onSkillError?.(m.error);
+        break;
+      case "vm_checkpoints": {
+        const v = state.viewers.get(m.owner);
+        if (!v) break;
+        for (const c of [".cp", ".undo"]) $(c, v.win.body).disabled = false;
+        const hint = $(".hint", v.win.body);
+        const last = m.checkpoints.at(-1);
+        hint.style.color = m.error ? "#b00" : "#3c9c2d";
+        hint.textContent = m.error ? m.error : m.action === "vm_undo" ? `Went back to "${last?.label}"` : `Checkpoint saved (${m.checkpoints.length} kept)`;
+        $(".undo", v.win.body).title = last ? `Go back to "${last.label}" (${new Date(last.at).toLocaleTimeString()})` : "No checkpoint yet";
+        break;
+      }
+      case "chatgpt":
+        state.chatgpt = m;
+        if (!m.pending) state.chatgptUrl = "";
+        state.onChatgpt?.();
+        break;
+      case "chatgpt_login_url":
+        state.chatgptUrl = m.url;
+        window.open(m.url, "_blank"); // the desktop app hands this to your real browser
+        state.onChatgpt?.();
+        break;
+      case "providers":
+        state.providers = m.providers || state.providers;
+        if ("demoMode" in m) state.demoMode = m.demoMode;
+        modelCache.delete("chatgpt");
+        renderBanner();
+        state.onChatgpt?.();
+        break;
       case "mcp":
         state.mcp = m.servers || [];
         renderMcpStatus();
@@ -318,7 +437,7 @@
           const v = openViewer(m.vm.owner, m.vm);
           v.win.setTitle(`${m.vm.id} — ${m.vm.owner}'s PC`);
           v.live.textContent = "● LIVE"; v.live.style.color = "";
-        } else if (NATIVE && VIEW === "buddylist") remote("viewer", m.vm.owner, false);
+        } else if (VIEW === "buddylist" && m.vm.owner !== "y2kbench") remote("viewer", m.vm.owner, false);
         break;
       }
       case "vm_stopped": {
@@ -351,27 +470,45 @@
   // ================= buddy list =================
   let blist;
   function showBuddyList() {
-    blist = createWindow({ id: "buddylist", title: `${state.me}'s Agent List`, x: innerWidth - 250, y: 16, w: 226, h: Math.min(560, innerHeight - 70), cls: "buddylist", closable: NATIVE });
+    blist = createWindow({ id: "buddylist", title: `${state.me}'s Agent List`, cls: "buddylist", closable: true });
     blist.body.innerHTML = `
-      <div class="menubar"><span class="m-agents">My Agents</span><span class="m-people">People</span>${NATIVE ? `<span class="m-prefs">Prefs</span>` : ""}<span class="m-mcp">MCP</span><span class="m-help">Help</span></div>
+      <div class="menubar"><span class="m-agents">My Agents</span><span class="m-prefs">Prefs</span><span class="m-mcp">MCP</span><span class="m-skills">Skills</span><span class="m-bench">Bench</span><span class="m-help">Help</span></div>
       <div class="banner"><img src="logo.svg" alt=""><div><div class="who"></div><div class="model"></div></div></div>
       <div class="tabs"><span class="on">Online</span><span class="setup-tab">List Setup</span></div>
       <div class="tree inset"></div>
       <div class="toolbar-bottom">
-        <button class="iconbtn" data-a="im"><span class="gl">💬</span>IM</button>
-        <button class="iconbtn" data-a="chat"><span class="gl">👥</span>Chat</button>
-        <button class="iconbtn" data-a="info"><span class="gl">ℹ️</span>Info</button>
-        <button class="iconbtn" data-a="setup"><span class="gl">🛠️</span>Setup</button>
-        <button class="iconbtn" data-a="add"><span class="gl">➕</span>Add</button>
-        <button class="iconbtn" data-a="sound"><span class="gl snd">🔊</span>Sound</button>
+        <button class="iconbtn needs-sel" data-a="im" title="Send an instant message"><img src="icons/im.svg" alt="">IM</button>
+        <button class="iconbtn" data-a="chat" title="Start a chat room"><img src="icons/chat.svg" alt="">Chat</button>
+        <button class="iconbtn needs-sel" data-a="info" title="Get buddy info"><img src="icons/info.svg" alt="">Info</button>
+        <button class="iconbtn" data-a="setup" title="Buddy setup"><img src="icons/setup.svg" alt="">Setup</button>
+        <button class="iconbtn" data-a="add" title="Add a buddy"><img src="icons/add.svg" alt="">Add</button>
+        <button class="iconbtn" data-a="sound" title="Sounds on/off"><img class="snd" src="icons/sound.svg" alt="">Sound</button>
       </div>`;
     $(".m-help", blist.body).onclick = openHelp;
-    $(".m-agents", blist.body).onclick = () => openAgentEditor();
-    $(".m-people", blist.body).onclick = () => state.selected && openInfo(state.selected);
-    if (NATIVE) $(".m-prefs", blist.body).onclick = openPrefs;
+    const selBuddy = () => (state.selected && getBuddy(state.selected)) || null;
+    attachMenus($(".menubar", blist.body), {
+      "My Agents": () => [
+        { label: "Add a Buddy…", action: () => openAgentEditor() },
+        { label: "Import a Buddy…", action: importBuddy },
+        "-",
+        { label: "Send Instant Message", disabled: !selBuddy(), action: () => openIM(state.selected) },
+        { label: "Get Buddy Info", disabled: !selBuddy(), action: () => openInfo(state.selected) },
+        { label: "Buddy Setup…", disabled: !selBuddy(), action: () => openAgentEditor(selBuddy()) },
+        "-",
+        { label: "Export Buddy…", disabled: !selBuddy(), action: () => exportBuddy(state.selected) },
+        { label: "Export Buddy with Memory…", disabled: !selBuddy() || selBuddy().capabilities.memory === false, action: () => exportBuddy(state.selected, true) },
+        "-",
+        { label: "Start a Chat Room…", action: () => openInvite("") },
+      ],
+    });
+    clearInterval(state.idleTimer);
+    state.idleTimer = setInterval(renderBuddyList, 60000); // idle times tick up
+    $(".m-prefs", blist.body).onclick = openPrefs;
     $(".m-mcp", blist.body).onclick = openMcp;
+    $(".m-skills", blist.body).onclick = openSkills;
+    $(".m-bench", blist.body).onclick = openBench;
     $(".setup-tab", blist.body).onclick = () => openAgentEditor(state.selected && getBuddy(state.selected));
-    $(".snd", blist.body).textContent = Sounds.muted ? "🔇" : "🔊";
+    $(".snd", blist.body).src = Sounds.muted ? "icons/sound-off.svg" : "icons/sound.svg";
     blist.body.querySelectorAll(".iconbtn").forEach((b) => (b.onclick = () => {
       const sel = state.selected;
       switch (b.dataset.a) {
@@ -383,7 +520,7 @@
         case "sound": {
           const on = Sounds.toggle();
           localStorage.setItem("ram.muted", on ? "0" : "1");
-          $(".snd", b).textContent = on ? "🔊" : "🔇";
+          $(".snd", b).src = on ? "icons/sound.svg" : "icons/sound-off.svg";
           break;
         }
       }
@@ -405,6 +542,7 @@
   function renderBuddyList() {
     if (!blist) return;
     const tree = $(".tree", blist.body);
+    $(".toolbar-bottom", blist.body)?.classList.toggle("no-sel", !(state.selected && getBuddy(state.selected)));
     const groups = new Map();
     for (const b of state.buddies) {
       if (!groups.has(b.group)) groups.set(b.group, []);
@@ -441,9 +579,10 @@
       if (!open) continue;
       for (const b of list) {
         const row = document.createElement("div");
-        row.className = "buddy" + (b.awayMessage ? " away" : "") + (b.busy ? " busy" : "") + (state.selected === b.screenName ? " sel" : "");
-        row.title = (b.awayMessage ? `Away: ${b.awayMessage}` : b.profile) + `\n${routeText(b)}`;
-        row.innerHTML = `<span class="ico">${b.busy ? "⌛" : b.awayMessage ? "✎" : ""}</span><span class="sn" style="${b.awayMessage ? "" : `color:${state.selected === b.screenName ? "#fff" : "#000"}`}"></span>${b.capabilities.xp ? `<span class="tag ${b.vm ? "run" : ""}">${b.vm ? "XP ON" : "XP"}</span>` : ""}${b.capabilities.imBuddies ? `<span class="tag">LEAD</span>` : ""}`;
+        const pr = presenceOf(b);
+        row.className = "buddy" + (pr.state === "away" ? " away" : "") + (pr.state === "idle" ? " idle" : "") + (b.busy ? " busy" : "") + (state.selected === b.screenName ? " sel" : "");
+        row.title = (pr.state === "away" ? `Away: ${pr.why}` : pr.state === "idle" ? `Idle for ${fmtIdle(pr.idle)}` : (b.profile || "").slice(0, 200)) + `\n${routeText(b)}`;
+        row.innerHTML = `<img class="av" src="${avatarUrl(b)}" alt=""><span class="ico">${b.busy ? "⌛" : pr.state === "away" ? "✎" : ""}</span><span class="sn"></span>${pr.state === "idle" ? `<span class="idle-t">(${fmtIdle(pr.idle)})</span>` : ""}${b.capabilities.xp ? `<span class="tag ${b.vm ? "run" : ""}">${b.vm ? "XP ON" : "XP"}</span>` : ""}${b.capabilities.imBuddies ? `<span class="tag">LEAD</span>` : ""}`;
         $(".sn", row).textContent = b.screenName;
         row.onclick = () => { state.selected = b.screenName; localStorage.setItem("ram.selected", b.screenName); renderBuddyList(); };
         row.ondblclick = () => openIM(b.screenName);
@@ -457,8 +596,7 @@
     if (!isMine("im", name)) { remote("im", name, !noFocus); return null; }
     let im = state.ims.get(name);
     if (im) { if (!noFocus) im.win.focus(); return im; }
-    const pos = nextPos(430, 400);
-    const win = createWindow({ id: "im:" + name, title: `${name} - Instant Message`, ...pos, w: 430, h: 400, cls: "im", onClose: () => state.ims.delete(name) });
+    const win = createWindow({ id: "im:" + name, title: `${name} - Instant Message`, cls: "im", onClose: () => state.ims.delete(name) });
     win.body.innerHTML = `
       <div class="menubar"><span>File</span><span>Edit</span><span>Insert</span><span>People</span></div>
       <div class="convo inset"></div>
@@ -471,27 +609,26 @@
         <button data-f="u" title="Underline"><u>U</u></button>
         <span class="sep"></span>
         <button data-f="code" title="Code">{ }</button>
-        <button data-f="smile" title="Smiley">☺</button>
+        <button data-f="smile" title="Smiley"><img src="icons/smile.svg" alt="Smiley"></button>
         <span class="sep"></span>
-        <button data-f="attach" title="Attach a file (or drop files on this window)">📎</button>
+        <button data-f="attach" title="Attach a file (or drop files on this window)"><img src="icons/clip.svg" alt="Attach"></button>
       </div>
       <div class="attach-bar"></div>
       <textarea class="input" placeholder="Type your message here..."></textarea>
       <div class="actions">
-        <button class="xp warn" title="Warn this buddy">Warn</button>
-        <button class="xp stop" title="Stop whatever this agent is doing">Block</button>
-        <button class="xp reset" title="Clear this agent's memory of the conversation">Reset</button>
-        <button class="xp info">Get Info</button>
-        <button class="xp watch" title="Watch this buddy's Windows XP machine">Watch XP</button>
-        <button class="xp share" title="Open the folder this buddy shares with its XP machine. Drop files on this window to send them.">Files</button>
+        <button class="iconbtn warn" title="Warn this buddy"><img src="icons/warn.svg" alt="">Warn</button>
+        <button class="iconbtn stop" title="Stop whatever this agent is doing"><img src="icons/block.svg" alt="">Block</button>
+        <button class="iconbtn reset" title="Clear this agent's memory of the conversation"><img src="icons/reset.svg" alt="">Reset</button>
+        <button class="iconbtn info" title="Get Info"><img src="icons/info.svg" alt="">Info</button>
+        <button class="iconbtn watch" title="Watch this buddy's Windows XP machine"><img src="icons/watch.svg" alt=""><span class="lbl">Watch</span></button>
+        <button class="iconbtn share" title="Open the folder this buddy shares with its XP machine. Drop files on this window to send them."><img src="icons/files.svg" alt="">Files</button>
         <span class="spacer"></span>
-        <button class="xp send">Send</button>
+        <button class="iconbtn send" title="Send (Enter)"><img src="icons/send.svg" alt=""><b>Send</b></button>
       </div>
       <div class="statusbar"></div>
       <div class="drop-hint">Drop files to attach them for ${esc(name)}</div>`;
     im = { win, name, convo: $(".convo", win.body), input: $(".input", win.body), status: $(".statusbar", win.body), typing: null, last: null, fontSize: 13, warn: 0, pending: [] };
     state.ims.set(name, im);
-    if (noFocus && !NATIVE) { win.el.classList.add("inactive"); win.tbtn.classList.remove("active"); win.flash(); }
 
     const doSend = () => {
       const text = im.input.value.trim();
@@ -521,17 +658,61 @@
     $(".share", win.body).onclick = () => {
       const dir = getBuddy(name)?.sharedDir;
       if (!dir) return;
-      if (NATIVE) window.ramNative.openPath(dir);
-      else addEvent(im, `${name}'s shared folder is ${dir}`);
+      window.ramNative.openPath(dir);
     };
     setupAttachments(im);
     win.body.querySelectorAll(".fmtbar button").forEach((b) => (b.onclick = () => fmt(im, b.dataset.f)));
+    attachMenus($(".menubar", win.body), {
+      File: () => convoFileMenu(im),
+      Edit: () => convoEditMenu(im),
+      Insert: () => [
+        { label: "File Attachment…", action: () => pickFiles(im) },
+        { label: "Smiley :-)", action: () => fmt(im, "smile") },
+        { label: "Code", key: "`…`", action: () => fmt(im, "code") },
+        { label: "Code Block", action: () => { im.input.setRangeText("\n```\n\n```\n", im.input.selectionStart, im.input.selectionEnd, "end"); im.input.focus(); } },
+      ],
+      People: () => {
+        const b = getBuddy(name);
+        return [
+          { label: "Get Info", action: () => openInfo(name) },
+          { label: "Buddy Setup…", disabled: !b, action: () => openAgentEditor(b) },
+          b?.capabilities.xp ? { label: "Watch XP", action: () => openViewer(name, b?.vm ?? null) } : null,
+          b?.sharedDir ? { label: "Open Shared Folder", action: () => window.ramNative.openPath(b.sharedDir) } : null,
+          "-",
+          { label: "Warn", action: () => $(".warn", win.body).click() },
+          { label: "Block (stop working)", action: () => send({ type: "stop", who: name }) },
+          { label: "Reset Conversation", action: () => send({ type: "reset", who: name }) },
+          "-",
+          { label: "Export Buddy…", disabled: !b, action: () => exportBuddy(name) },
+          { label: "Export Buddy with Memory…", disabled: !b || b.capabilities.memory === false, action: () => exportBuddy(name, true) },
+        ];
+      },
+    });
     updateImChrome(name, im);
     refreshStatus(im);
+    setInterval(() => { if (!im.typing) refreshStatus(im); }, 60000); // idle time ticks up
     send({ type: "history", window: name });
     if (!noFocus) im.input.focus();
     return im;
   }
+
+  const convoFileMenu = (im) => [
+    { label: "Save Conversation as Text…", action: () => saveConversation(im.name, "txt") },
+    { label: "Save Conversation as Web Page…", action: () => saveConversation(im.name, "html") },
+    "-",
+    { label: "Open Chat Logs Folder", action: () => window.ramNative.openDataFolder("logs") },
+    "-",
+    { label: "Close", key: "Alt+F4", action: () => im.win.close() },
+  ];
+  const convoEditMenu = (im) => [
+    { label: "Copy", key: "Ctrl+C", disabled: !String(getSelection()).trim() && im.input.selectionStart === im.input.selectionEnd, action: () => document.execCommand("copy") },
+    { label: "Select All of Conversation", action: () => { const r = document.createRange(); r.selectNodeContents(im.convo); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); } },
+    "-",
+    { label: "Clear Window", action: () => { im.convo.innerHTML = ""; } },
+    "-",
+    { label: "Bigger Text", action: () => fmt(im, "bigger") },
+    { label: "Smaller Text", action: () => fmt(im, "smaller") },
+  ];
 
   function fmt(im, f) {
     const t = im.input;
@@ -624,7 +805,8 @@
     $(".share", im.win.body).style.display = b?.sharedDir ? "" : "none";
     const watch = $(".watch", im.win.body);
     watch.style.display = b?.capabilities.xp ? "" : "none";
-    watch.textContent = b?.vm ? "Watch XP ●" : "Watch XP";
+    $(".lbl", watch).textContent = b?.vm ? "Watch ●" : "Watch";
+    if (!im.typing) refreshStatus(im); // working → idle/away shows up straight away
     if (!b && state.buddies.length) refreshStatus(im, `${name} is no longer on your agent list.`);
   }
 
@@ -638,8 +820,13 @@
     im.status.textContent = override
       ?? (im.typing ? `${im.typing} is typing...`
         : b?.busy ? `${im.name} is working...`
-        : im.last ? `Last message received at ${timeStr(im.last)}`
-        : b?.awayMessage ? `${im.name} is away.` : "");
+        : (() => {
+          const pr = presenceOf(b);
+          const tail = im.last ? `Last message received at ${timeStr(im.last)}` : "";
+          if (pr.state === "away") return `${im.name} is away: ${pr.why}${tail ? ` · ${tail}` : ""}`;
+          if (pr.state === "idle") return `${im.name} has been idle for ${fmtIdle(pr.idle)}${tail ? ` · ${tail}` : ""}`;
+          return tail;
+        })());
   }
 
   function renderText(text) {
@@ -698,8 +885,7 @@
     if (!isMine("room", room)) { remote("room", room, !noFocus); return null; }
     let im = state.ims.get(room);
     if (im) { if (!noFocus) im.win.focus(); return im; }
-    const pos = nextPos(560, 420);
-    const win = createWindow({ id: "room:" + room, title: `${room} - Chat Room`, ...pos, w: 560, h: 420, cls: "im room", onClose: () => state.ims.delete(room) });
+    const win = createWindow({ id: "room:" + room, title: `${room} - Chat Room`, cls: "im room", onClose: () => state.ims.delete(room) });
     win.body.innerHTML = `
       <div class="menubar"><span>File</span><span>Edit</span><span>People</span></div>
       <div class="room-main">
@@ -714,18 +900,17 @@
       <div class="attach-bar"></div>
       <textarea class="input" placeholder="Say something to the room..."></textarea>
       <div class="actions">
-        <button class="xp clip" title="Attach a file (or drop files on this window)">📎</button>
-        <button class="xp stop" title="Stop the buddies mid-conversation">Block</button>
-        <button class="xp reset" title="Buddies forget this room's conversation">Reset</button>
-        <button class="xp close-room" title="Close the room for everyone">Close Room</button>
+        <button class="iconbtn clip" title="Attach a file (or drop files on this window)"><img src="icons/clip.svg" alt="">Attach</button>
+        <button class="iconbtn stop" title="Stop the buddies mid-conversation"><img src="icons/block.svg" alt="">Block</button>
+        <button class="iconbtn reset" title="Buddies forget this room's conversation"><img src="icons/reset.svg" alt="">Reset</button>
+        <button class="iconbtn close-room" title="Close the room for everyone"><img src="icons/door.svg" alt="">Close</button>
         <span class="spacer"></span>
-        <button class="xp send">Send</button>
+        <button class="iconbtn send" title="Send (Enter)"><img src="icons/send.svg" alt=""><b>Send</b></button>
       </div>
       <div class="statusbar"></div>
       <div class="drop-hint">Drop files to share them with the room</div>`;
     im = { win, name: room, room: true, convo: $(".convo", win.body), input: $(".input", win.body), status: $(".statusbar", win.body), typing: null, last: null, fontSize: 13, selected: null, pending: [] };
     state.ims.set(room, im);
-    if (noFocus && !NATIVE) { win.el.classList.add("inactive"); win.tbtn.classList.remove("active"); win.flash(); }
     const doSend = () => {
       const text = im.input.value.trim();
       const attachments = im.pending.map((f) => f.name);
@@ -747,6 +932,19 @@
     $(".reset", win.body).onclick = () => send({ type: "reset", who: room });
     $(".close-room", win.body).onclick = () => { if (confirm(`Close ${room}? Everyone leaves and the conversation is cleared.`)) { send({ type: "room_close", room }); win.close(); } };
     $(".invite", win.body).onclick = () => openInvite(room);
+    attachMenus($(".menubar", win.body), {
+      File: () => convoFileMenu(im),
+      Edit: () => convoEditMenu(im),
+      People: () => [
+        { label: "Invite Buddies…", action: () => openInvite(room) },
+        { label: "Remove Selected Buddy", disabled: !im.selected || im.selected === state.me, action: () => $(".kick", win.body).click() },
+        { label: "Get Info on Selected", disabled: !im.selected || !getBuddy(im.selected), action: () => openInfo(im.selected) },
+        "-",
+        { label: "Block (stop everyone)", action: () => send({ type: "stop", who: room }) },
+        { label: "Reset Conversation", action: () => send({ type: "reset", who: room }) },
+        { label: "Close Room…", action: () => $(".close-room", win.body).click() },
+      ],
+    });
     $(".kick", win.body).onclick = () => { if (im.selected) send({ type: "room_leave", room, who: im.selected }); im.selected = null; };
     renderRoomPeople(im);
     send({ type: "history", window: room });
@@ -781,7 +979,7 @@
   function openInvite(room) {
     if (!isMine("invite", room)) return remote("invite", room);
     const existing = state.rooms.find((r) => r.name === room);
-    const win = createWindow({ id: "invite", title: existing ? `Invite to ${room}` : "Buddy Chat Invitation", x: innerWidth / 2 - 160, y: 80, w: 320, cls: "dialog" });
+    const win = createWindow({ id: "invite", title: existing ? `Invite to ${room}` : "Buddy Chat Invitation", cls: "dialog" });
     const candidates = state.buddies.filter((b) => !existing?.members.includes(b.screenName));
     const preselect = state.selected || localStorage.getItem("ram.selected"); // the agent list is another window in the app
     win.body.innerHTML = `
@@ -848,12 +1046,15 @@
       sel.style.display = ""; sel.disabled = true;
       sel.innerHTML = `<option>Loading models…</option>`;
       status.textContent = ""; status.className = "mp-status";
-      const r = info?.ready === false ? { models: [], error: `${info.label} isn't connected yet. Add its key/URL in Prefs (Save & Restart), or type a model name.` } : await fetchModels(id, force);
+      const notReady = id === "chatgpt"
+        ? "Not signed in to ChatGPT yet. In Prefs, click Continue with ChatGPT (no restart needed)."
+        : `${info?.label} isn't connected yet. Add its key/URL in Prefs (Save & Restart), or type a model name.`;
+      const r = info?.ready === false ? { models: [], error: notReady } : await fetchModels(id, force);
       if (my !== token) return; // provider changed while loading
       sel.disabled = false;
       const opts = [];
       if (allowDefault && !chosen) opts.push(`<option value="">Default (${esc(state.model)})</option>`);
-      for (const m of r.models) opts.push(`<option value="${esc(m.id)}">${esc(m.id + capsText(m))}</option>`);
+      for (const m of r.models) opts.push(`<option value="${esc(m.id)}">${esc((m.label || m.id) + capsText(m))}</option>`);
       if (r.error || !r.models.length) {
         // nothing to pick from: plain text box (plus "default" if allowed)
         if (allowDefault && !chosen) { sel.innerHTML = opts.join("") + `<option value="__custom__">Other (type a name)…</option>`; sel.value = want ? "__custom__" : ""; }
@@ -883,6 +1084,161 @@
     return picker;
   }
 
+  // ================= Y2Kbench =================
+  const bench = { tasks: [], runs: [], busy: null, live: null, picker: null, open: new Set(), selected: new Set() };
+  const pct = (p, t) => (t ? Math.round((p / t) * 100) + "%" : "–");
+  const STATUS = { pass: ["✅", "pass"], fail: ["❌", "fail"], error: ["⚠️", "error: couldn't verify"], stopped: ["⏹", "stopped"], queued: ["·", "queued"], running: ["⏳", "running"] };
+
+  function benchHandle(m) {
+    if (m.type === "bench_tasks") { bench.tasks = m.tasks || []; bench.busy = m.busy; renderBenchTasks(); }
+    if (m.type === "bench_history") { bench.runs = m.runs || []; bench.busy = m.busy; renderBenchHistory(); renderBenchButtons(); }
+    if (m.type === "bench_progress") {
+      bench.busy = m.runId;
+      const live = (bench.live ??= { runId: m.runId, rows: {}, total: m.total });
+      live.runId = m.runId; live.total = m.total;
+      const key = `${m.index}`;
+      const row = (live.rows[key] ??= { task: m.task, status: "running", phase: "", steps: 0 });
+      if (m.phase === "done") { row.status = m.result.status; row.ms = m.result.ms; row.steps = m.result.toolCalls; row.detail = m.result.error || m.result.checks.filter((c) => !c.ok).map((c) => c.label + ": " + c.detail).join("; "); live.summary = m.summary; }
+      else { row.status = "running"; row.phase = m.event ? `${m.phase} (${m.toolCalls} steps): ${m.event.replace(/^y2kbench /, "")}` : m.phase; if (m.toolCalls) row.steps = m.toolCalls; }
+      renderBenchLive(); renderBenchButtons();
+    }
+    if (m.type === "bench_finished") { bench.busy = null; send({ type: "bench_history" }); renderBenchButtons(); }
+    if (m.type === "bench_error") { bench.busy = null; const el = document.querySelector(".bench-msg"); if (el) { el.textContent = "✖ " + m.error; el.className = "bench-msg err"; } renderBenchButtons(); }
+    if (m.type === "bench_markdown") {
+      navigator.clipboard?.writeText(m.text).then(() => flashBenchMsg("Copied the results table. Paste it into your README.")).catch(() => { flashBenchMsg("Couldn't use the clipboard. Here's the table:"); const ta = document.querySelector(".bench-md"); if (ta) { ta.style.display = ""; ta.value = m.text; ta.select(); } });
+    }
+  }
+  const flashBenchMsg = (t) => { const el = document.querySelector(".bench-msg"); if (el) { el.textContent = t; el.className = "bench-msg"; } };
+
+  function openBench() {
+    if (!isMine("bench")) return remote("bench");
+    const win = createWindow({ id: "bench", title: "Y2Kbench: XP task benchmark", cls: "dialog benchwin" });
+    win.body.innerHTML = `
+      <div class="content bench">
+        <fieldset class="groupbox"><legend>New run</legend>
+          <div class="bench-row">
+            <label>Provider<br><select class="b-provider"></select></label>
+            <div style="flex:1.6">Model<div class="b-model"></div></div>
+            <label>Clicks<br><select class="b-coords"><option value="auto">Auto</option><option value="pixels">Pixels</option><option value="norm1000">0–1000</option></select></label>
+            <label>Repeat<br><input type="text" class="b-repeat" value="1" style="width:34px"></label>
+          </div>
+          <div class="bench-row" style="margin-top:4px"><label style="flex:1">Label (optional)<br><input type="text" class="b-label" placeholder="e.g. qwen3-vl:8b + xp_guide" style="width:100%"></label></div>
+          <div class="bench-row" style="margin-top:4px;gap:14px">
+            <label class="row"><input type="checkbox" class="b-cmd" checked> Allow the command line (xp_cmd)</label>
+            <label class="row" title="Off keeps runs comparable: with it on, what one task teaches can help the next"><input type="checkbox" class="b-skills"> Use and save skills</label>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;margin-top:6px"><b>Tasks</b><a class="b-all">all</a><a class="b-none">none</a><span class="b-count" style="color:#555"></span></div>
+          <div class="bench-tasks inset"></div>
+          <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+            <span style="font-size:10px;color:#555;flex:1">Each task boots a fresh XP machine. Under emulation, allow 2–5 minutes per task.</span>
+            <button class="xp b-watch">Watch XP</button><button class="xp b-stop">Stop</button><button class="xp b-run"><b>Run</b></button>
+          </div>
+          <div class="bench-msg"></div>
+          <textarea class="bench-md" style="display:none;width:100%;height:90px"></textarea>
+        </fieldset>
+        <fieldset class="groupbox bench-live-box"><legend>This run</legend><div class="bench-live"><i style="color:#777">Not running.</i></div></fieldset>
+        <fieldset class="groupbox"><legend>History</legend>
+          <div style="display:flex;gap:6px;margin-bottom:4px"><span style="flex:1;font-size:10px;color:#555">Tick runs to compare them, then copy a Markdown table for your README.</span><button class="xp b-md">Copy Markdown</button></div>
+          <div class="bench-history"></div>
+        </fieldset>
+      </div>`;
+    const f = (c) => $(c, win.body);
+    f(".b-provider").innerHTML = state.providers.map((p) => `<option value="${esc(p.id)}">${esc(p.label)}${p.ready ? "" : " (not set up)"}</option>`).join("");
+    f(".b-provider").value = state.provider;
+    bench.picker = modelPicker(f(".b-model"), { getProvider: () => f(".b-provider").value, value: state.model });
+    f(".b-provider").onchange = () => bench.picker.reload();
+    f(".b-all").onclick = () => { win.body.querySelectorAll(".bench-tasks input").forEach((c) => (c.checked = true)); countTasks(); };
+    f(".b-none").onclick = () => { win.body.querySelectorAll(".bench-tasks input").forEach((c) => (c.checked = false)); countTasks(); };
+    f(".b-watch").onclick = () => openViewer("y2kbench", null);
+    f(".b-stop").onclick = () => send({ type: "bench_stop" });
+    f(".b-run").onclick = () => {
+      const taskIds = [...win.body.querySelectorAll(".bench-tasks input:checked")].map((c) => c.value);
+      const model = bench.picker.value;
+      if (!taskIds.length) return flashBenchMsg("Pick at least one task.");
+      if (!model) return flashBenchMsg("Pick a model.");
+      bench.live = { runId: null, total: 0, rows: {} };
+      renderBenchLive();
+      flashBenchMsg("Starting…");
+      send({ type: "bench_run", provider: f(".b-provider").value, model, coords: f(".b-coords").value, repeat: Number(f(".b-repeat").value) || 1, label: f(".b-label").value.trim(), taskIds, cmd: f(".b-cmd").checked, skills: f(".b-skills").checked });
+    };
+    f(".b-md").onclick = () => {
+      const ids = [...bench.selected];
+      if (!ids.length) return flashBenchMsg("Tick one or more runs in History first.");
+      send({ type: "bench_markdown", runIds: ids });
+    };
+    send({ type: "bench_tasks" });
+    send({ type: "bench_history" });
+  }
+
+  function countTasks() {
+    const all = document.querySelectorAll(".bench-tasks input").length, on = document.querySelectorAll(".bench-tasks input:checked").length;
+    const el = document.querySelector(".b-count"); if (el) el.textContent = `${on} of ${all} selected`;
+  }
+
+  function renderBenchTasks() {
+    const box = document.querySelector(".bench-tasks");
+    if (!box) return;
+    box.innerHTML = ["easy", "medium", "hard"].map((lvl) => `
+      <div class="bench-level"><b>${lvl}</b>${bench.tasks.filter((t) => t.level === lvl).map((t) => `
+        <label class="row" title="${esc(t.prompt)}"><input type="checkbox" value="${esc(t.id)}" checked> ${esc(t.title)}</label>`).join("")}</div>`).join("");
+    box.querySelectorAll("input").forEach((c) => (c.onchange = countTasks));
+    countTasks();
+  }
+
+  function renderBenchButtons() {
+    const run = document.querySelector(".b-run"), stop = document.querySelector(".b-stop");
+    if (run) run.disabled = !!bench.busy;
+    if (stop) stop.disabled = !bench.busy;
+  }
+
+  function renderBenchLive() {
+    const box = document.querySelector(".bench-live");
+    if (!box || !bench.live) return;
+    const L = bench.live;
+    const rows = Object.entries(L.rows).sort((a, b) => Number(a[0]) - Number(b[0]));
+    const done = rows.filter(([, r]) => r.status !== "running").length;
+    box.innerHTML = `
+      <div style="margin-bottom:3px">${done}/${L.total || "?"} done${L.summary ? ` · <b>${L.summary.pass}/${L.summary.total} passed</b>` : ""}</div>
+      <table class="bench-table">${rows.map(([, r]) => `
+        <tr class="st-${r.status}"><td>${STATUS[r.status]?.[0] ?? ""}</td><td>${esc(r.task)}</td>
+        <td class="ph">${esc(r.status === "running" ? r.phase : r.detail || STATUS[r.status]?.[1] || "")}</td>
+        <td class="num">${r.steps ?? ""}</td><td class="num">${r.ms ? Math.round(r.ms / 1000) + "s" : ""}</td></tr>`).join("")}</table>`;
+  }
+
+  function renderBenchHistory() {
+    const box = document.querySelector(".bench-history");
+    if (!box) return;
+    if (!bench.runs.length) { box.innerHTML = `<i style="color:#777">No runs yet.</i>`; return; }
+    box.innerHTML = bench.runs.map((r) => {
+      const b = r.summary.byLevel || {};
+      const lvl = (k) => `<span class="lvl">${k} ${pct(b[k]?.pass || 0, b[k]?.total || 0)}</span>`;
+      const errs = r.tasks.filter((t) => t.status === "error").length;
+      const open = bench.open.has(r.id);
+      return `
+        <div class="bench-run" data-id="${esc(r.id)}">
+          <div class="bench-run-hd">
+            <input type="checkbox" class="sel" ${bench.selected.has(r.id) ? "checked" : ""}>
+            <b class="tgl">${open ? "▼" : "▶"} ${esc(r.label)}</b>
+            <span class="big">${pct(r.summary.pass, r.summary.total)}</span>
+            ${lvl("easy")}${lvl("medium")}${lvl("hard")}
+            <span class="when">${esc(r.startedAt.slice(0, 16).replace("T", " "))}${r.finishedAt ? "" : " (running)"}${errs ? ` · ${errs} couldn't be verified` : ""}</span>
+            <a class="del" title="Delete this run">✕</a>
+          </div>
+          ${open ? `<table class="bench-table">${r.tasks.map((t) => `
+            <tr class="st-${t.status}"><td>${STATUS[t.status]?.[0] ?? ""}</td><td title="${esc(t.reply || "")}">${esc(t.title)} <span style="color:#888">(${t.level})</span></td>
+            <td class="ph">${esc(t.error || t.checks.filter((c) => !c.ok).map((c) => c.label + ": " + c.detail).join("; ") || (t.status === "pass" ? "" : ""))}</td>
+            <td class="num">${t.toolCalls}</td><td class="num">${Math.round(t.ms / 1000)}s</td>
+            <td>${t.screenshot ? `<a href="/bench/shot/${encodeURIComponent(r.id)}/${encodeURIComponent(t.screenshot)}" target="_blank" title="Final screen"><img class="thumb" src="/bench/shot/${encodeURIComponent(r.id)}/${encodeURIComponent(t.screenshot)}"></a>` : ""}</td></tr>`).join("")}</table>` : ""}
+        </div>`;
+    }).join("");
+    box.querySelectorAll(".bench-run").forEach((el) => {
+      const id = el.dataset.id;
+      $(".tgl", el).onclick = () => { bench.open.has(id) ? bench.open.delete(id) : bench.open.add(id); renderBenchHistory(); };
+      $(".sel", el).onchange = (e) => { e.target.checked ? bench.selected.add(id) : bench.selected.delete(id); };
+      $(".del", el).onclick = () => { if (confirm("Delete this run and its screenshots?")) { bench.selected.delete(id); send({ type: "bench_delete", runId: id }); } };
+    });
+  }
+
   // ================= MCP servers =================
   const MCP_EXAMPLES = {
     filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users\\you\\Documents"] },
@@ -890,19 +1246,104 @@
     "remote-example": { url: "https://example.com/mcp", headers: { Authorization: "Bearer YOUR_TOKEN" } },
   };
 
+  // ================= approvals: "Are you sure?" before risky MCP actions =================
+  function renderApprove(m) {
+    if (state.approveShown) return;
+    state.approveShown = true;
+    const win = createWindow({ id: "approve", title: `Allow ${m.title}?`, cls: "dialog approvewin", onClose: () => { if (!state.approveDone) send({ type: "approve_reply", id: m.id, ok: false }); } });
+    const b = getBuddy(m.who);
+    win.body.innerHTML = `
+      <div class="content">
+        <div class="ap-top">
+          <img src="icons/warn.svg" alt="" width="32" height="32">
+          <div><b>${esc(m.who)}</b> wants to use <b>${esc(m.title)}</b> from the <b>${esc(m.server)}</b> MCP server.
+          <div class="ap-why">Asking because ${esc(m.why)}.</div></div>
+          ${b ? `<img class="ap-av" src="${avatarUrl(b)}" alt="" width="32" height="32">` : ""}
+        </div>
+        <details class="ap-details"${m.args.length < 300 ? " open" : ""}><summary>What it will send</summary><pre>${esc(m.args)}</pre></details>
+        <label class="row"><input type="checkbox" class="ap-always"> Don't ask again when ${esc(m.who)} uses this tool</label>
+      </div>
+      <div class="buttons"><button class="xp ap-yes">Allow</button><button class="xp ap-no"><b>Don't Allow</b></button></div>`;
+    const answer = (ok) => { state.approveDone = true; send({ type: "approve_reply", id: m.id, ok, always: ok && $(".ap-always", win.body).checked }); window.ramNative.close(); };
+    $(".ap-yes", win.body).onclick = () => answer(true);
+    $(".ap-no", win.body).onclick = () => answer(false);
+    addEventListener("keydown", (e) => { if (e.key === "Escape") answer(false); });
+    $(".ap-no", win.body).focus(); // the safe choice is the default
+    window.ramNative.flash();
+    fitToContent(win);
+  }
+
+  // ================= skills =================
+  function openSkills() {
+    if (!isMine("skills")) return remote("skills");
+    const win = createWindow({ id: "skills", title: "Skill Library", cls: "dialog skillswin" });
+    win.body.innerHTML = `
+      <div class="content">
+        <div style="font-size:11px">Recipes that worked, saved by your buddies after finishing tasks. Every buddy can use them, and the closest ones are handed to a buddy when it starts something similar. Edit or delete any that are wrong.</div>
+        <div style="display:flex;gap:4px;margin-top:6px"><input type="text" class="sk-q" placeholder="Search skills" style="flex:1"><button class="xp sk-new" style="min-width:0">New…</button></div>
+        <div class="sk-list inset"></div>
+        <div class="sk-edit" style="display:none">
+          <b>Title</b><input type="text" class="sk-title">
+          <b>When to use it</b><input type="text" class="sk-when">
+          <b>Steps</b><textarea class="sk-steps" spellcheck="false"></textarea>
+          <div class="sk-status" style="font-size:10px;min-height:13px"></div>
+          <div style="display:flex;gap:4px"><button class="xp sk-del" style="margin-right:auto">Delete</button><button class="xp sk-cancel">Cancel</button><button class="xp sk-save"><b>Save</b></button></div>
+        </div>
+      </div>
+      <div class="buttons"><span class="sk-count" style="margin-right:auto;font-size:10px;color:#555;align-self:center"></span><button class="xp close">Close</button></div>`;
+    const f = (c) => $(c, win.body);
+    let editing = null; // skill id, "" = new, null = not editing
+    const edit = (sk) => {
+      editing = sk ? sk.id : "";
+      f(".sk-edit").style.display = "";
+      f(".sk-title").value = sk?.title || ""; f(".sk-when").value = sk?.when || ""; f(".sk-steps").value = sk?.steps || "";
+      f(".sk-del").style.display = sk ? "" : "none";
+      f(".sk-status").textContent = "";
+      f(".sk-title").focus();
+    };
+    const stopEdit = () => { editing = null; f(".sk-edit").style.display = "none"; };
+    const render = () => {
+      if (!document.body.contains(win.body)) { state.onSkills = null; return; }
+      const all = state.skills || [];
+      const q = f(".sk-q").value.trim().toLowerCase();
+      const shown = q ? all.filter((k) => `${k.title} ${k.when} ${k.steps}`.toLowerCase().includes(q)) : all;
+      f(".sk-count").textContent = `${all.length} skill${all.length === 1 ? "" : "s"}`;
+      f(".sk-list").innerHTML = shown.length ? shown.map((k) => `
+        <div class="sk-row${editing === k.id ? " sel" : ""}" data-id="${esc(k.id)}">
+          <div class="sk-t">${esc(k.title)}</div>
+          <div class="sk-w">${esc(k.when || "")}</div>
+          <div class="sk-m">by ${esc(k.by)} · ${esc(k.updated.slice(0, 10))}${k.uses ? ` · used ${k.uses}×` : ""}</div>
+        </div>`).join("") : `<div class="sk-empty">${all.length ? "No skills match." : "No skills yet. Buddies save one after they finish a task that worked, or add your own with New…"}</div>`;
+      f(".sk-list").querySelectorAll(".sk-row").forEach((row) => (row.onclick = () => { edit(all.find((k) => k.id === row.dataset.id)); render(); }));
+    };
+    state.onSkills = render;
+    state.onSkillError = (msg) => { const st = f(".sk-status"); st.textContent = "✖ " + msg; st.style.color = "#b00"; };
+    f(".sk-q").oninput = render;
+    f(".sk-new").onclick = () => { edit(null); render(); };
+    f(".sk-cancel").onclick = () => { stopEdit(); render(); };
+    f(".sk-save").onclick = () => {
+      send({ type: "skill_put", id: editing || undefined, title: f(".sk-title").value, when: f(".sk-when").value, steps: f(".sk-steps").value });
+      const st = f(".sk-status"); st.textContent = "Saved."; st.style.color = "#3c9c2d";
+    };
+    f(".sk-del").onclick = () => { if (editing) send({ type: "skill_delete", id: editing }); stopEdit(); };
+    f(".close").onclick = () => win.close();
+    send({ type: "skills_get" });
+    render();
+  }
+
   function openMcp() {
     if (!isMine("mcp")) return remote("mcp");
-    const win = createWindow({ id: "mcp", title: "MCP Servers", x: innerWidth / 2 - 240, y: 40, w: 480, h: 560, cls: "dialog mcpwin" });
+    const win = createWindow({ id: "mcp", title: "MCP Servers", cls: "dialog mcpwin" });
     win.body.innerHTML = `
       <div class="content" style="flex:1;min-height:0">
-        <div style="font-size:11px">Connect buddies to MCP servers. Same format as Claude Desktop's <code>claude_desktop_config.json</code>: local servers use <code>command</code>/<code>args</code>/<code>env</code>, remote ones use <code>url</code> (+ <code>headers</code>). Then tick servers per buddy in <b>Buddy Setup</b>.</div>
+        <div style="font-size:11px">Connect buddies to MCP servers. Same format as Claude Desktop's <code>claude_desktop_config.json</code>: local servers use <code>command</code>/<code>args</code>/<code>env</code>, remote ones use <code>url</code> (+ <code>headers</code>). Then tick servers per buddy in <b>Buddy Setup</b>.<br>Before a buddy uses a tool that could change, send or delete something, you're asked first. Add <code>"approve": "always"</code> or <code>"never"</code> to a server to change that.</div>
         <b style="margin-top:6px">Status</b>
         <div class="mcp-status inset"></div>
         <div style="display:flex;align-items:center;gap:6px;margin-top:6px"><b>mcp.json</b><span style="flex:1"></span><button class="xp ex" style="min-width:0">Insert example</button></div>
         <textarea class="mcp-json" spellcheck="false"></textarea>
         <div class="mcp-save-status" style="font-size:10px;min-height:13px"></div>
       </div>
-      <div class="buttons"><button class="xp rc" style="margin-right:auto">Reconnect</button><button class="xp cancel">Close</button><button class="xp save"><b>Save &amp; Connect</b></button></div>`;
+      <div class="buttons"><button class="xp rc">Reconnect</button><button class="xp ap-reset" style="margin-right:auto" title="Forget every 'Don't ask again' choice">Ask again for everything</button><button class="xp cancel">Close</button><button class="xp save"><b>Save &amp; Connect</b></button></div>`;
     const ta = $(".mcp-json", win.body);
     send({ type: "mcp_config_get" });
     $(".ex", win.body).onclick = () => {
@@ -912,6 +1353,7 @@
       ta.value = JSON.stringify(j, null, 2);
     };
     $(".rc", win.body).onclick = () => send({ type: "mcp_reconnect" });
+    $(".ap-reset", win.body).onclick = () => { send({ type: "approvals_reset" }); const st = $(".mcp-save-status", win.body); st.textContent = "OK: you'll be asked again before every risky tool."; st.style.color = "#3c9c2d"; };
     $(".cancel", win.body).onclick = () => win.close();
     $(".save", win.body).onclick = () => {
       try { JSON.parse(ta.value); } catch (e) { const st = $(".mcp-save-status", win.body); st.textContent = "✖ Not valid JSON: " + e.message; st.style.color = "#b00"; return; }
@@ -943,14 +1385,15 @@
     if (!isMine("viewer", owner)) { remote("viewer", owner); return null; }
     let v = state.viewers.get(owner);
     if (v) { v.vm = vm ?? v.vm; v.win.focus(); return v; }
-    const w = Math.min(680, innerWidth - 300), h = Math.round(w * 0.75) + 70;
-    const win = createWindow({ id: "vm:" + owner, title: `${vm?.id ?? "XP"} — ${owner}'s PC`, x: Math.max(10, innerWidth - w - 270), y: 30, w, h, cls: "viewer", onClose: () => state.viewers.delete(owner) });
+    const win = createWindow({ id: "vm:" + owner, title: `${vm?.id ?? "XP"} — ${owner}'s PC`, cls: "viewer", onClose: () => state.viewers.delete(owner) });
     win.body.innerHTML = `
       <div class="screen"><img alt="Windows XP screen" style="display:none"><div class="placeholder"></div></div>
       <div class="bar">
         <span class="live">● LIVE</span>
         <span class="hint" style="font-size:10px;color:#555">click the screen to take the mouse</span>
         <span class="spacer"></span>
+        <button class="xp cp" title="Save the machine as it is now, so you (or the buddy) can go back to it">Checkpoint</button>
+        <button class="xp undo" title="Go back to the latest checkpoint">Undo</button>
         <button class="xp on">Power on</button>
         <button class="xp cad">Ctrl+Alt+Del</button>
         <button class="xp off">Pull the plug</button>
@@ -963,7 +1406,7 @@
     else {
       const doc = state.xp;
       v.ph.innerHTML = `No machine running.<br>Ask ${esc(owner)} to do something on XP and it'll boot one.` +
-        (doc && !doc.ok ? `<br><br><span style="color:#f99">Not set up yet: ${esc(doc.problems.join(" "))}</span>${NATIVE ? "<br>(fix it in Prefs)" : ""}` : "");
+        (doc && !doc.ok ? `<br><br><span style="color:#f99">Not set up yet: ${esc(doc.problems.join(" "))}</span><br>(fix it in Prefs)` : "");
       v.live.textContent = "OFF"; v.live.style.color = "#b00";
     }
     const coords = (e) => {
@@ -976,6 +1419,10 @@
     $(".cad", win.body).onclick = () => send({ type: "vm_key", owner, combo: "ctrl+alt+delete" });
     $(".on", win.body).onclick = () => { v.ph.innerHTML = "Starting Windows...<br>▮▮▮▯▯▯"; send({ type: "vm_boot", owner }); };
     $(".off", win.body).onclick = () => send({ type: "vm_shutdown", owner });
+    for (const [c, type] of [[".cp", "vm_checkpoint"], [".undo", "vm_undo"]]) {
+      const btn = $(c, win.body);
+      btn.onclick = () => { btn.disabled = true; send({ type, owner }); setTimeout(() => (btn.disabled = false), 4000); };
+    }
     if (vm) { v.live.textContent = "● LIVE"; v.live.style.color = ""; }
     return v;
   }
@@ -985,11 +1432,15 @@
     if (!isMine("info", name)) return remote("info", name);
     const b = getBuddy(name);
     if (!b) return;
-    const win = createWindow({ id: "info:" + name, title: `Buddy Info: ${name}`, x: innerWidth / 2 - 160, y: 90, w: 320, cls: "dialog" });
+    const win = createWindow({ id: "info:" + name, title: `Buddy Info: ${name}`, cls: "dialog" });
     win.body.innerHTML = `
       <div class="content">
-        <b style="font-size:13px;color:${esc(b.color)}">${esc(b.screenName)}</b>
-        <div>Group: ${esc(b.group)}</div>
+        <div class="info-head">
+          <img src="${avatarUrl(b)}" alt="" width="48" height="48">
+          <div><b style="font-size:13px;color:${esc(b.color)}">${esc(b.screenName)}</b>
+          <div>${(() => { const pr = presenceOf(b); return pr.state === "busy" ? "Working on something right now" : pr.state === "away" ? `<i>Away: ${esc(pr.why)}</i>` : pr.state === "idle" ? `Idle for ${fmtIdle(pr.idle)}` : "Online"; })()}</div>
+          <div>Group: ${esc(b.group)}</div></div>
+        </div>
         <div>Brain: <b>${esc(routeText(b))}</b>${b.provider || b.model ? "" : " <i>(default)</i>"}</div>
         <div>Can use Windows XP: <b>${b.capabilities.xp ? "yes" : "no"}</b> &nbsp;·&nbsp; Can IM buddies: <b>${b.capabilities.imBuddies ? "yes" : "no"}</b> &nbsp;·&nbsp; Web: <b>${b.capabilities.web === false ? "no" : state.web?.ready ? "search + pages" : "pages only"}</b></div>
         <div>MCP: <b>${b.mcp === "all" ? "all servers" : Array.isArray(b.mcp) && b.mcp.length ? esc(b.mcp.join(", ")) : "none"}</b>${b.capabilities.xp ? ` &nbsp;·&nbsp; XP clicks: <b>${b.coords === "pixels" ? "pixels" : b.coords === "norm1000" ? "0–1000" : `auto (${/qwen[-_. ]?3(\.\d+)?[-_. ]?vl/i.test(b.route?.model || "") ? "0–1000" : "pixels"})`}</b>` : ""}</div>
@@ -1018,7 +1469,7 @@
     if (!isMine("editor", existing?.screenName || "")) return remote("editor", existing?.screenName || "");
     const a = existing || { screenName: "", group: "Buddies", color: "#0000c0", profile: "", awayMessage: "", persona: "", capabilities: { xp: false, imBuddies: false }, model: "" };
     const groups = [...new Set(state.buddies.map((b) => b.group))];
-    const win = createWindow({ id: "editor", title: existing ? `Buddy Setup: ${a.screenName}` : "Add Buddy", x: innerWidth / 2 - 200, y: 50, w: 400, cls: "dialog" });
+    const win = createWindow({ id: "editor", title: existing ? `Buddy Setup: ${a.screenName}` : "Add Buddy", cls: "dialog" });
     win.body.innerHTML = `
       <div class="content">
         <b>Screen name</b><input type="text" class="f-sn" maxlength="24" ${existing ? "disabled" : ""}>
@@ -1026,7 +1477,9 @@
           <div style="flex:1"><b>Group</b><input type="text" class="f-group" list="grp"><datalist id="grp">${groups.map((g) => `<option value="${esc(g)}">`).join("")}</datalist></div>
           <div><b>Name colour</b><br><input type="color" class="f-color"></div>
         </div>
-        <b>Profile (shown in Get Info)</b><input type="text" class="f-profile">
+        <b>Buddy icon</b>
+        <div class="icon-pick">${AVATARS.map((n) => `<button type="button" data-icon="${n}" title="${n}"><img src="avatars/${n}.svg" alt="${n}"></button>`).join("")}</div>
+        <b>Profile (shown in Get Info; the buddy can rewrite it)</b><textarea class="f-profile" rows="2" style="resize:vertical"></textarea>
         <b>Away message (blank = here)</b><input type="text" class="f-away">
         <b>Instructions / persona (system prompt)</b><textarea class="f-persona" placeholder="You are an agent who..."></textarea>
         <div style="display:flex;gap:8px">
@@ -1043,21 +1496,28 @@
             <option value="pixels">Pixels (Claude, GPT, most models)</option>
             <option value="norm1000">0–1000 scale (Qwen3-VL)</option>
           </select></label>
+          <label class="row f-cmd-row" style="padding-left:20px"><input type="checkbox" class="f-cmd"> Can run commands in XP (xp_cmd: fast, reliable file work)</label>
           <label class="row"><input type="checkbox" class="f-im"> Can IM other buddies (orchestrator)</label>
           <label class="row"><input type="checkbox" class="f-mem"> Has long-term memory (keeps notes between chats)</label>
+          <label class="row"><input type="checkbox" class="f-skills"> Uses the shared skill library (learns recipes that worked)</label>
           <label class="row"><input type="checkbox" class="f-web"> Can use the web (search${state.web?.ready ? "" : " — not set up yet"} and read pages)</label>
           <div style="margin-top:4px"><b>MCP servers</b> <a class="f-mcp-setup" style="color:#00e;text-decoration:underline;cursor:pointer;font-size:10px">set up servers…</a></div>
           <div class="f-mcp inset">${state.mcp.length ? `<label class="row"><input type="checkbox" value="__all__"> <i>All servers (including ones added later)</i></label>` + state.mcp.map((m) => `<label class="row"><input type="checkbox" value="${esc(m.name)}"> ${esc(m.name)} <span style="font-size:10px;color:${m.state === "connected" ? "#3c9c2d" : "#b00"}">${m.state === "connected" ? `${m.tools.length} tools` : esc(m.state)}</span></label>`).join("") : `<i style="color:#777">No MCP servers configured.</i>`}</div>
         </fieldset>
       </div>
       <div class="buttons">
-        ${existing ? `<button class="xp del" style="margin-right:auto">Remove Buddy</button>` : ""}
+        ${existing ? `<button class="xp del" style="margin-right:auto">Remove Buddy</button>` : `<button class="xp imp" style="margin-right:auto" title="Add a buddy from a .y2kbuddy file">Import…</button>`}
         <button class="xp cancel">Cancel</button><button class="xp save"><b>${existing ? "Save" : "Add"}</b></button>
       </div>`;
     const f = (c) => $(c, win.body);
     f(".f-sn").value = a.screenName; f(".f-group").value = a.group; f(".f-color").value = a.color;
     f(".f-profile").value = a.profile; f(".f-away").value = a.awayMessage || ""; f(".f-persona").value = a.persona;
     f(".f-provider").value = a.provider || "";
+    let icon = iconOf(a.screenName ? a : { screenName: "new" });
+    const pickUi = () => win.body.querySelectorAll(".icon-pick button").forEach((b) => b.classList.toggle("on", b.dataset.icon === icon));
+    win.body.querySelectorAll(".icon-pick button").forEach((b) => (b.onclick = () => { icon = b.dataset.icon; pickUi(); }));
+    pickUi();
+    if (!existing) f(".imp").onclick = () => { win.close(); importBuddy(); };
     // a model written as "ollama:llama3.2" picks the provider too
     let startModel = a.model || "";
     const pm = /^([a-z0-9-]+):(.+)$/.exec(startModel);
@@ -1065,7 +1525,8 @@
     const picker = modelPicker(f(".f-model-wrap"), { getProvider: () => f(".f-provider").value, value: startModel, allowDefault: true });
     f(".f-provider").onchange = () => picker.reload();
     f(".f-xp").checked = a.capabilities.xp; f(".f-coords").value = a.coords || "auto";
-    const coordsUi = () => { f(".f-coords-row").style.display = f(".f-xp").checked ? "" : "none"; };
+    const coordsUi = () => { for (const r of [".f-coords-row", ".f-cmd-row"]) f(r).style.display = f(".f-xp").checked ? "" : "none"; };
+    f(".f-cmd").checked = a.capabilities.xpCmd !== false; f(".f-skills").checked = a.capabilities.skills !== false;
     f(".f-xp").addEventListener("change", coordsUi); coordsUi(); f(".f-im").checked = a.capabilities.imBuddies; f(".f-mem").checked = a.capabilities.memory !== false; f(".f-web").checked = a.capabilities.web !== false;
     for (const cb of win.body.querySelectorAll(".f-mcp input")) cb.checked = a.mcp === "all" ? cb.value === "__all__" : Array.isArray(a.mcp) && a.mcp.includes(cb.value);
     const allBox = win.body.querySelector('.f-mcp input[value="__all__"]');
@@ -1080,8 +1541,8 @@
       send({ type: "upsert_agent", agent: {
         screenName: sn, group: f(".f-group").value.trim() || "Buddies", color: f(".f-color").value,
         profile: f(".f-profile").value, awayMessage: f(".f-away").value.trim() || null, persona: f(".f-persona").value.trim(),
-        provider: f(".f-provider").value || undefined, model: picker.value || undefined, capabilities: { xp: f(".f-xp").checked, imBuddies: f(".f-im").checked, memory: f(".f-mem").checked, web: f(".f-web").checked },
-        coords: f(".f-coords").value,
+        provider: f(".f-provider").value || undefined, model: picker.value || undefined, capabilities: { xp: f(".f-xp").checked, imBuddies: f(".f-im").checked, memory: f(".f-mem").checked, web: f(".f-web").checked, xpCmd: f(".f-cmd").checked, skills: f(".f-skills").checked },
+        coords: f(".f-coords").value, icon,
         mcp: allBox?.checked ? "all" : [...win.body.querySelectorAll(".f-mcp input:checked")].map((cb) => cb.value).filter((v) => v !== "__all__"),
       } });
       setTimeout(() => win.close(), 50);
@@ -1091,7 +1552,7 @@
 
   function openHelp() {
     if (!isMine("help")) return remote("help");
-    const win = createWindow({ id: "help", title: "Help", x: 60, y: 60, w: 380, cls: "dialog" });
+    const win = createWindow({ id: "help", title: "Help", cls: "dialog" });
     win.body.innerHTML = `
       <div class="content" style="font-size:11px;line-height:1.5">
         <b style="font-size:13px">Y2Kbot</b>
@@ -1105,9 +1566,13 @@
           <li>Buddies keep <b>long-term notes</b> between chats. See and edit them in <b>Info</b>.</li>
           <li>Drop, paste or 📎 files into any IM or room. Buddies can read text, code, PDFs, Word docs and images.</li>
           <li>Buddies can <b>search and read the web</b>, and use any <b>MCP</b> servers you connect (menu: MCP).</li>
+          <li><b>Bench</b> runs Y2Kbench, a set of Windows XP tasks that measures how well a model drives XP.</li>
           <li><b>Block</b> stops an agent mid-task. <b>Reset</b> wipes its memory of the chat.</li>
-          <li><b>Add</b>/<b>Setup</b> to create or edit agents.</li>
-          ${NATIVE ? "<li><b>Prefs</b> holds your model providers (Anthropic, OpenAI, Ollama, OpenRouter, Gemini, Groq, LM Studio, or any OpenAI-compatible server) and Windows XP settings.</li>" : ""}
+          <li><b>Add</b>/<b>Setup</b> to create or edit agents, and pick each one's buddy icon. <b>My Agents</b> → <b>Import / Export</b> shares a buddy as a <code>.y2kbuddy</code> file (no keys inside).</li>
+          <li>Grey names are <b>idle</b>; ✎ means <b>away</b> (an away message, or its model isn't answering). You hear the door when a buddy drops out or comes back.</li>
+          <li>Before a buddy uses an MCP tool that could change, send or delete something, you're asked first.</li>
+          <li><b>File</b> → <b>Save Conversation</b> in any IM saves it as text or a web page. Prefs can keep a log of every chat.</li>
+          <li><b>Prefs</b> holds your model providers (your ChatGPT Plus/Pro plan via Sign in with ChatGPT, Anthropic, OpenAI, Ollama, OpenRouter, Gemini, Groq, LM Studio, or any OpenAI-compatible server) and Windows XP settings.</li>
         </ul>
         ${state.xp && !state.xp.ok ? `<div style="color:#b00">Windows XP isn't set up yet: ${esc(state.xp.problems.join(" "))}</div>` : ""}
       </div>
@@ -1118,6 +1583,7 @@
 
   // What the Prefs table shows. key = placeholder for an API key field; url = default base URL (undefined = fixed).
   const PROVIDERS = [
+    { id: "chatgpt", label: "ChatGPT plan", signin: true, example: "auto" },
     { id: "anthropic", label: "Anthropic", key: "sk-ant-...", example: "claude-sonnet-5-5" },
     { id: "openai", label: "OpenAI", key: "sk-...", url: "https://api.openai.com/v1", example: "gpt-5" },
     { id: "ollama", label: "Ollama", url: "http://localhost:11434/v1", example: "qwen2.5vl:7b" },
@@ -1131,7 +1597,7 @@
   async function openPrefs() {
     if (!isMine("prefs")) return remote("prefs");
     const s = await window.ramNative.getSettings();
-    const win = createWindow({ id: "prefs", title: "Preferences", x: 0, y: 0, w: 420, cls: "dialog" });
+    const win = createWindow({ id: "prefs", title: "Preferences", cls: "dialog" });
     const h = s.health;
     win.body.innerHTML = `
       <div class="content">
@@ -1144,7 +1610,7 @@
           <table class="ptable">${PROVIDERS.map((p) => `
             <tr data-id="${p.id}">
               <td class="pname"><span class="dot"></span>${p.label}</td>
-              <td>${p.key ? `<input type="password" class="p-key" placeholder="${p.key}">` : ""}${p.url !== undefined ? `<input type="text" class="p-url" placeholder="${p.url || "https://your-server/v1"}">` : ""}</td>
+              <td>${p.signin ? `<div class="p-cgpt"></div>` : ""}${p.key ? `<input type="password" class="p-key" placeholder="${p.key}">` : ""}${p.url !== undefined ? `<input type="text" class="p-url" placeholder="${p.url || "https://your-server/v1"}">` : ""}</td>
             </tr>`).join("")}
           </table>
         </fieldset>
@@ -1159,6 +1625,12 @@
             <label style="flex:1"><b class="p-search-label">Key / URL</b><br><input type="password" class="p-search-key" style="width:100%"><input type="text" class="p-searx" style="width:100%" placeholder="http://192.168.1.10:8080"></label>
           </div>
           <label class="row"><input type="checkbox" class="p-private"> Let buddies fetch pages on my local network <span style="font-size:10px;color:#555">(off = safer)</span></label>
+        </fieldset>
+        <fieldset class="groupbox"><legend>Chat logs</legend>
+          <div style="display:flex;align-items:center;gap:6px">
+            <label class="row" style="flex:1"><input type="checkbox" class="p-logs"> Keep a log of every conversation <span style="font-size:10px;color:#555">(one web page per buddy per day)</span></label>
+            <button class="xp p-logs-open" style="min-width:0">Open logs…</button>
+          </div>
         </fieldset>
         <fieldset class="groupbox"><legend>Windows XP machines</legend>
           <b>XP base disk image (.qcow2)</b>
@@ -1191,6 +1663,10 @@
           </div>
           <label class="row"><input type="checkbox" class="p-acpi"> ACPI on <span style="font-size:10px;color:#555">(match how XP was installed: you used <code>acpi=off</code> → leave unticked)</span></label>
           <label class="row"><input type="checkbox" class="p-share"> Give each XP buddy a shared folder (appears as a drive in XP)</label>
+          <label class="row p-bus-row">Shared drive connects as&nbsp;<select class="p-bus">
+            <option value="usb">USB drive (allows checkpoints / undo)</option>
+            <option value="ide">Hard disk (older; no undo)</option>
+          </select></label>
           <div class="p-status" style="font-size:10px;margin-top:6px"></div>
         </fieldset>
       </div>
@@ -1209,9 +1685,42 @@
       $(".dot", row).title = ready[id] ? "ready" : "not set up";
     }
     f(".p-provider").onchange = () => picker.reload();
+
+    // Sign in with ChatGPT: happens live, no Save & Restart needed.
+    const cgBox = f(".p-cgpt");
+    const renderChatgpt = () => {
+      if (!document.body.contains(cgBox)) { state.onChatgpt = null; return; }
+      const c = state.chatgpt || {};
+      let html;
+      if (c.pending) {
+        html = `<span>Waiting for your browser…</span> <button class="xp cg-cancel">Cancel</button>`
+          + (state.chatgptUrl ? ` <a href="${esc(state.chatgptUrl)}" target="_blank" rel="noopener">open it again</a>` : "");
+      } else if (c.signedIn) {
+        html = `<span>Signed in${c.email ? ` as <b>${esc(c.email)}</b>` : ""}</span> <button class="xp cg-out">Sign out</button>`;
+      } else {
+        html = `<button class="xp cg-in">Continue with ChatGPT</button>` + (c.known ? ` <a href="#" class="cg-fresh">Use another account</a>` : "");
+      }
+      if (c.error) html += `<div class="cg-err">${esc(c.error)}</div>`;
+      else if (!c.signedIn && !c.pending) html += `<div class="cg-note">ChatGPT Plus or Pro. Buddies use your plan's allowance instead of an API key.</div>`;
+      cgBox.innerHTML = html;
+      const on = !!state.providers.find((p) => p.id === "chatgpt")?.ready;
+      const dot = $(".dot", cgBox.closest("tr"));
+      dot.classList.toggle("on", on); dot.title = on ? "ready" : "not signed in";
+      const btn = (c) => $(c, cgBox);
+      if (btn(".cg-in")) btn(".cg-in").onclick = () => { btn(".cg-in").disabled = true; send({ type: "chatgpt_login" }); };
+      if (btn(".cg-fresh")) btn(".cg-fresh").onclick = (e) => { e.preventDefault(); send({ type: "chatgpt_login", fresh: true }); };
+      if (btn(".cg-cancel")) btn(".cg-cancel").onclick = () => send({ type: "chatgpt_cancel" });
+      if (btn(".cg-out")) btn(".cg-out").onclick = () => { btn(".cg-out").disabled = true; btn(".cg-out").textContent = "Signing out…"; send({ type: "chatgpt_logout" }); };
+      if (f(".p-provider").value === "chatgpt") picker.reload();
+      fitToContent(win);
+    };
+    state.onChatgpt = renderChatgpt;
+    renderChatgpt();
     f(".p-img").value = s.xpBaseImage; f(".p-qemu").value = s.qemuBin;
     f(".p-mem").value = s.xpMemoryMb; f(".p-max").value = s.xpMaxVms; f(".p-net").value = s.xpNetwork;
     f(".p-search").value = s.searchProvider || ""; f(".p-searx").value = s.searxngUrl || ""; f(".p-private").checked = !!s.webAllowPrivate;
+    f(".p-logs").checked = !!s.chatLogs;
+    f(".p-logs-open").onclick = () => window.ramNative.openDataFolder("logs");
     const searchUi = () => {
       const p = f(".p-search").value;
       f(".p-search-key").style.display = p === "brave" || p === "tavily" ? "" : "none";
@@ -1222,6 +1731,9 @@
     };
     f(".p-search").onchange = searchUi; searchUi();
     f(".p-accel").value = s.xpAccel || ""; f(".p-cpu").value = s.xpCpu || "pentium3"; f(".p-acpi").checked = !!s.xpAcpi; f(".p-share").checked = s.xpShare !== false;
+    f(".p-bus").value = s.xpShareBus === "ide" ? "ide" : "usb";
+    const busUi = () => { f(".p-bus-row").style.display = f(".p-share").checked ? "" : "none"; };
+    f(".p-share").addEventListener("change", busUi); busUi();
     const st = f(".p-status");
     if (h?.xp?.ok) { st.style.color = "#3c9c2d"; st.textContent = `✔ Ready to boot XP (acceleration: ${h.xp.accel}, CPU: ${h.xp.cpu}, ACPI ${h.xp.acpi ? "on" : "off"})`; }
     else if (h) { st.style.color = "#b00"; st.textContent = "✖ " + h.xp.problems.join(" "); }
@@ -1233,11 +1745,11 @@
         provider: f(".p-provider").value, model: picker.value,
         keys: { ...Object.fromEntries([...win.body.querySelectorAll(".ptable tr")].filter((r) => $(".p-key", r)).map((r) => [r.dataset.id, $(".p-key", r).value])),
           ...(["brave", "tavily"].includes(f(".p-search").value) ? { [f(".p-search").value]: f(".p-search-key").value } : {}) },
-        searchProvider: f(".p-search").value, searxngUrl: f(".p-searx").value.trim(), webAllowPrivate: f(".p-private").checked,
+        searchProvider: f(".p-search").value, searxngUrl: f(".p-searx").value.trim(), webAllowPrivate: f(".p-private").checked, chatLogs: f(".p-logs").checked,
         baseUrls: Object.fromEntries([...win.body.querySelectorAll(".ptable tr")].filter((r) => $(".p-url", r)).map((r) => [r.dataset.id, $(".p-url", r).value])),
         xpBaseImage: f(".p-img").value.trim(),
         qemuBin: f(".p-qemu").value.trim(), xpMemoryMb: f(".p-mem").value, xpMaxVms: f(".p-max").value, xpNetwork: f(".p-net").value,
-        xpAccel: f(".p-accel").value, xpCpu: f(".p-cpu").value, xpAcpi: f(".p-acpi").checked, xpShare: f(".p-share").checked,
+        xpAccel: f(".p-accel").value, xpCpu: f(".p-cpu").value, xpAcpi: f(".p-acpi").checked, xpShare: f(".p-share").checked, xpShareBus: f(".p-bus").value,
       });
       window.ramNative.relaunch();
     };
@@ -1245,13 +1757,9 @@
   }
 
   // ================= boot =================
-  const tick = () => ($("#clock").textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }));
-  tick(); setInterval(tick, 10000);
-  $("#start-btn").onclick = () => (blist ? blist.focus() : null);
   if (localStorage.getItem("ram.muted") === "1" && !Sounds.muted) Sounds.toggle();
 
-  if (!NATIVE) showSignOn();
-  else if (VIEW === "signon") showSignOn();
+  if (VIEW === "signon") showSignOn();
   else if (VIEW === "prefs") connect(() => openPrefs());
   else connect(() => {
     switch (VIEW) {
@@ -1260,10 +1768,20 @@
       case "room": openRoom(ARG); break;
       case "invite": openInvite(ARG); break;
       case "mcp": openMcp(); break;
+      case "skills": openSkills(); break;
+      case "bench": openBench(); break;
       case "viewer": openViewer(ARG, getBuddy(ARG)?.vm ?? null); break;
       case "info": openInfo(ARG); break;
       case "editor": openAgentEditor(ARG ? getBuddy(ARG) : null); break;
       case "help": openHelp(); break;
+      case "approve": // the request itself arrives right after the buddy list
+        setTimeout(() => {
+          if (state.approveShown) return;
+          const w = createWindow({ id: "approve", title: "Y2Kbot", cls: "dialog" });
+          w.body.innerHTML = `<div class="content">That request has already been answered.</div>`;
+          setTimeout(() => window.ramNative.close(), 1500);
+        }, 1500);
+        break;
     }
   });
 })();

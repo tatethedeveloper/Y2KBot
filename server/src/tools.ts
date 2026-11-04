@@ -5,8 +5,10 @@ import type { XPManager } from "./vm/xp.js";
 import type { MemoryStore } from "./memory.js";
 import type { AttachmentStore } from "./files.js";
 import { READ_CHARS } from "./files.js";
-import type { McpManager } from "./mcp.js";
+import type { McpManager, ToolRisk } from "./mcp.js";
 import type { Guide } from "./knowledge.js";
+import { format as formatSkill, type SkillStore } from "./skills.js";
+import { findText, type Ocr, type Match } from "./ocr.js";
 import { webFetch, webSearch, searchReady, PAGE_CHARS, type SearchConfig } from "./web.js";
 import { readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -26,6 +28,10 @@ export interface ToolCtx {
   window: string;
   coordMode: CoordMode;
   guide: Guide;
+  ocr: Ocr;
+  skills: SkillStore;
+  /** Ask the user (XP-style "Are you sure?") before a risky MCP action. */
+  approve: (req: ToolRisk & { who: string; args: unknown }) => Promise<"yes" | "no" | "timeout" | "nobody">;
   depth: number;
   imBuddy: (to: string, text: string) => Promise<string>;
 }
@@ -67,6 +73,76 @@ const XP_GUIDE: Anthropic.Tool = {
   input_schema: { type: "object", properties: { topic: { type: "string" } } },
 };
 
+const XP_CMD: Anthropic.Tool = {
+  name: "xp_cmd",
+  description:
+    "Run a Windows command line (cmd.exe) inside your XP machine and get its text output back directly. No screenshots or clicking needed, so it's the fastest and most reliable way to do anything with files, folders or settings. " +
+    'Examples: "echo hello world> C:\\work\\hello.txt", "mkdir C:\\work", "ren C:\\a.txt b.txt", "move C:\\a.txt D:\\", "copy C:\\a.txt C:\\backup\\", "del C:\\old.txt", "type C:\\notes.txt", "dir /b C:\\work", "hostname", ' +
+    '"reg query \"HKCU\\Control Panel\\Desktop\" /v Wallpaper" (quote paths with spaces). Chain steps with &. ' +
+    "It opens a console window that closes itself when the command finishes. Your command runs inside ( ), so write a literal ) in echo text as ^). " +
+    'To open a program without waiting for it, use start: "start \"\" notepad C:\\notes.txt". Avoid huge listings (dir /s over all of C:) and anything that waits for keyboard input. ' +
+    "Still check visual results (wallpaper, a window you opened) with a screenshot.",
+  input_schema: {
+    type: "object",
+    properties: {
+      command: { type: "string", description: "One command line, ASCII only." },
+      timeout_seconds: { type: "integer", minimum: 5, maximum: 600, default: 60 },
+    },
+    required: ["command"],
+  },
+};
+
+const XP_UNDO_TOOLS: Anthropic.Tool[] = [
+  {
+    name: "xp_checkpoint",
+    description:
+      "Save your whole XP machine exactly as it is right now (open windows, memory and disk) so you can go back to it with xp_undo. " +
+      "Take one BEFORE anything risky or hard to reverse: installing software, deleting or overwriting files, changing system settings, editing the registry, or a long fiddly sequence. " +
+      "Takes a few seconds. The last 3 are kept. The shared drive is briefly unplugged while it saves.",
+    input_schema: { type: "object", properties: { label: { type: "string", description: "A short name, e.g. \"before installing\"." } } },
+  },
+  {
+    name: "xp_undo",
+    description:
+      "Put your XP machine back exactly as it was at a checkpoint: the latest one, or one named by its label. Use it when something went wrong (a broken install, a deleted file, a mess of windows) instead of trying to repair it by hand. " +
+      "Later checkpoints are discarded. Files in the shared folder are NOT rolled back.",
+    input_schema: { type: "object", properties: { label: { type: "string" } } },
+  },
+];
+
+export const PROFILE_LIMIT = 600;
+const PROFILE_SET: Anthropic.Tool = {
+  name: "profile_set",
+  description:
+    `Rewrite your buddy profile: the page people see when they click Get Info on you. Up to ${PROFILE_LIMIT} characters, in your own voice: who you are, what you're good at, ` +
+    "what you've been working on lately, maybe a favourite quote. Turn-of-the-millennium profile energy is welcome. Update it now and then when something changes; don't touch it every chat.",
+  input_schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+};
+
+const SKILL_TOOLS: Anthropic.Tool[] = [
+  {
+    name: "skill_search",
+    description: "Search the skill library: recipes that worked before, saved by you and the other buddies. Search before starting something you're unsure how to do (e.g. \"change wallpaper\", \"unzip a file\").",
+    input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+  },
+  {
+    name: "skill_save",
+    description:
+      "Save a recipe that WORKED so every buddy can reuse it next time. Do this after finishing a multi-step task once you've checked the result, especially if it took a few tries to find the way. " +
+      "Write the exact steps or commands that worked (not the failed attempts), short and general enough to reuse: replace one-off names with placeholders like <file>. " +
+      "Saving with the same title as an existing skill improves it; do that if a saved skill was wrong or there's a better way.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "What it does, e.g. \"Rename a file with the command line\"." },
+        when: { type: "string", description: "When to use it, in one sentence." },
+        steps: { type: "string", description: "Numbered steps or the exact commands/tool calls that worked." },
+      },
+      required: ["title", "when", "steps"],
+    },
+  },
+];
+
 const XP_TOOLS_BASE: Anthropic.Tool[] = [
   {
     name: "xp_boot",
@@ -86,6 +162,28 @@ const XP_TOOLS_BASE: Anthropic.Tool[] = [
       'Examples: "notepad", "notepad C:\\notes.txt" (asks to create it if missing), "cmd", "explorer C:\\", "D:\\" (shared drive), "control", "mspaint", "calc", "wordpad", ' +
       '"cmd /c echo hello> C:\\hello.txt" (quick one-line file). Returns a screenshot once the screen settles.',
     input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+  },
+  {
+    name: "xp_click_text",
+    description:
+      "Click something by the text written on it: a button (\"OK\", \"Save\", \"Next >\"), a menu (\"File\"), a menu item, a tab, a link, or an icon's label (\"My Computer\"). " +
+      "The screen is read with OCR and the click lands on the label itself, so you don't need coordinates. This is the most reliable way to click anything that has words on it. " +
+      "Matching ignores case and punctuation. If the text appears more than once you'll be told where each one is; call again with nth (1 = first in the list). Use double=true to open icons and files.",
+    input_schema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "The label to click, exactly as shown on screen (e.g. \"Save\", \"Turn Off Computer\")." },
+        nth: { type: "integer", minimum: 1, description: "Which match to click when the text appears several times." },
+        double: { type: "boolean", default: false },
+        button: { type: "string", enum: ["left", "right"], default: "left" },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "xp_read_screen",
+    description: "Read all the text currently on the XP screen (OCR), with where each piece is. Useful to check which dialog is open, read an error message, or find the exact label to pass to xp_click_text.",
+    input_schema: { type: "object", properties: {} },
   },
   {
     name: "xp_click",
@@ -153,7 +251,7 @@ const SHARED_TOOLS: Anthropic.Tool[] = [
   },
   {
     name: "shared_write",
-    description: "Write a text file into your shared folder so XP can open it from the shared drive, or so the user can pick it up. Only works while your XP machine is OFF; files appear in XP on the next boot.",
+    description: "Write a text file into your shared folder so XP can open it from the shared drive, or so the user can pick it up. If XP is running, the shared drive is briefly unplugged and plugged back in so the file shows up straight away.",
     input_schema: { type: "object", properties: { name: { type: "string" }, content: { type: "string" } }, required: ["name", "content"] },
   },
 ];
@@ -189,6 +287,8 @@ const READ_FILE: Anthropic.Tool = {
 
 export const hasMemory = (a: Agent) => a.capabilities.memory !== false;
 export const hasWeb = (a: Agent) => a.capabilities.web !== false;
+export const hasXpCmd = (a: Agent) => a.capabilities.xp && a.capabilities.xpCmd !== false;
+export const hasSkills = (a: Agent) => a.capabilities.skills !== false;
 
 export function toolsFor(
   agent: Agent, store: AgentStore, depth: number,
@@ -197,9 +297,11 @@ export function toolsFor(
   const tools: Anthropic.Tool[] = [READ_FILE];
   if (hasWeb(agent)) { if (searchReady(opts.search)) tools.push(WEB_SEARCH); tools.push(WEB_FETCH); }
   tools.push(...opts.mcp.toolsFor(agent.mcp));
-  if (agent.capabilities.xp) tools.push(XP_GUIDE, ...xpTools(opts.coordMode));
+  if (agent.capabilities.xp) tools.push(XP_GUIDE, ...(hasXpCmd(agent) ? [XP_CMD] : []), ...xpTools(opts.coordMode), ...XP_UNDO_TOOLS);
   if (agent.capabilities.xp && opts.shared) tools.push(...SHARED_TOOLS);
   if (hasMemory(agent)) tools.push(...MEMORY_TOOLS);
+  if (hasSkills(agent)) tools.push(...SKILL_TOOLS);
+  if (!agent.lockVm) tools.push(PROFILE_SET);
   if (opts.room) return tools; // no side-channel IMs from inside a chat room
   if (agent.capabilities.imBuddies && depth === 0) {
     const others = store.all().filter((a) => a.screenName !== agent.screenName && !a.capabilities.imBuddies);
@@ -226,6 +328,22 @@ function sharedFile(ctx: ToolCtx, name: unknown): string {
   return path.join(dir, base);
 }
 
+/** Real screen pixels → the agent's own coordinate style (for telling it where things are). */
+function toAgent(ctx: ToolCtx, x: number, y: number): [number, number] {
+  if (ctx.coordMode !== "norm1000") return [Math.round(x), Math.round(y)];
+  const { width, height } = ctx.vms.size(ctx.agent.screenName);
+  return [Math.round((x / Math.max(1, width - 1)) * 1000), Math.round((y / Math.max(1, height - 1)) * 1000)];
+}
+
+function where(ctx: ToolCtx, b: Match["box"]): string {
+  const { width, height } = ctx.vms.size(ctx.agent.screenName);
+  const cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
+  const v = cy < height / 3 ? "top" : cy > (height * 2) / 3 ? "bottom" : "middle";
+  const h = cx < width / 3 ? "left" : cx > (width * 2) / 3 ? "right" : "centre";
+  const [ax, ay] = toAgent(ctx, cx, cy);
+  return `${v === "middle" && h === "centre" ? "centre" : `${v}-${h}`} of the screen, at (${ax}, ${ay})`;
+}
+
 /** Turn a model's x/y into real screen pixels. */
 function px(ctx: ToolCtx, x: unknown, y: unknown): [number, number] {
   let nx = Math.round(Number(x)), ny = Math.round(Number(y));
@@ -250,10 +368,42 @@ const shot = async (ctx: ToolCtx, note: string, maxMs = 8000): Promise<ToolResul
   ];
 };
 
+/** Keep a long command output readable: the start and the end, with a note about what was cut. */
+function clip(text: string, max = 10_000): string {
+  if (text.length <= max) return text;
+  const head = text.slice(0, Math.round(max * 0.7)), tail = text.slice(-Math.round(max * 0.3));
+  return `${head}\n\n[... ${text.length - head.length - tail.length} characters cut ...]\n\n${tail}`;
+}
+
+/**
+ * After the shared USB drive is plugged back in, XP may pop up AutoPlay ("What do you want Windows to do?").
+ * Close it so it doesn't sit on top of whatever the buddy was doing.
+ */
+export async function dismissAutoPlay(vms: XPManager, ocr: Ocr, owner: string): Promise<boolean> {
+  for (let i = 0; i < 3; i++) {
+    await sleep(1500);
+    if (!vms.has(owner)) return false;
+    await vms.settle(owner, { maxMs: 4000 });
+    const text = (await ocr.read(await vms.frame(owner))).map((l) => l.text).join(" ");
+    if (/what do you want windows to do|windows can perform the same action/i.test(text)) { await vms.key(owner, "esc"); return true; }
+  }
+  return false;
+}
+
 export async function runTool(name: string, input: any, ctx: ToolCtx): Promise<ToolOutput> {
   const me = ctx.agent.screenName;
   try {
     if (ctx.mcp.owns(name)) {
+      const risk = ctx.mcp.risk(name);
+      if (risk?.ask) {
+        const answer = await ctx.approve({ ...risk, who: me, args: input });
+        if (answer !== "yes") {
+          const why = answer === "no" ? `The user said no to ${risk.tool}. Don't retry it; ask them what they'd like instead, or find another way.`
+            : answer === "timeout" ? `Nobody answered the request to approve ${risk.tool} within 5 minutes, so it wasn't run.`
+            : `${risk.tool} needs the user's approval, but no Y2Kbot window is open to ask, so it wasn't run.`;
+          return { content: why, isError: true, status: answer === "no" ? `was told no to ${risk.tool}` : `couldn't get approval for ${risk.tool}` };
+        }
+      }
       const r = await ctx.mcp.call(name, input, ctx.agent.mcp);
       return { content: r.content, isError: r.isError, status: `used ${r.tool} (${r.server})` };
     }
@@ -307,6 +457,83 @@ export async function runTool(name: string, input: any, ctx: ToolCtx): Promise<T
         const note = `Ran "${cmd}" from Start → Run.${skipped.length ? ` (Skipped untypeable characters: ${[...new Set(skipped)].join(" ")})` : ""}`;
         return { content: await shot(ctx, note, 15000), status: `ran ${cmd.slice(0, 50)}` };
       }
+      case "xp_cmd": {
+        const cmd = String(input.command ?? "").replace(/[\r\n]+/g, " & ").trim();
+        if (!cmd) throw new Error("Give a command, e.g. dir C:\\");
+        const secs = Math.max(5, Math.min(600, Number(input.timeout_seconds) || 60));
+        const r = await ctx.vms.cmd(me, cmd, secs * 1000);
+        const out = r.output ? clip(r.output) : "(no output)";
+        const head = !r.finished
+          ? `Still running after ${secs}s. Its console window is still open and will close when it finishes. Output so far:`
+          : r.ok ? `Finished OK in ${(r.ms / 1000).toFixed(1)}s. Output:` : `Finished with an error (non-zero exit code) in ${(r.ms / 1000).toFixed(1)}s. Output:`;
+        return { content: `${head}\n${out}`, isError: r.finished && !r.ok, status: `ran \`${cmd.slice(0, 60)}${cmd.length > 60 ? "…" : ""}\` in XP's command line` };
+      }
+      case "xp_checkpoint": {
+        const cp = await ctx.vms.checkpoint(me, String(input.label ?? ""));
+        void dismissAutoPlay(ctx.vms, ctx.ocr, me).catch(() => {});
+        const all = ctx.vms.checkpoints(me);
+        return { content: `Saved checkpoint "${cp.label}". Checkpoints you can xp_undo to: ${all.map((c) => `"${c.label}"`).join(", ")}.`, status: `saved a checkpoint ("${cp.label}")` };
+      }
+      case "xp_undo": {
+        const cp = await ctx.vms.undo(me, input.label ? String(input.label) : undefined);
+        await dismissAutoPlay(ctx.vms, ctx.ocr, me).catch(() => {});
+        return { content: await shot(ctx, `Went back to checkpoint "${cp.label}" (from ${new Date(cp.at).toLocaleTimeString()}). The machine is exactly as it was then; the shared folder was not rolled back.`, 6000), status: `went back to checkpoint "${cp.label}"` };
+      }
+      case "profile_set": {
+        const text = String(input.text ?? "").trim();
+        if (!text) throw new Error("Write something for your profile.");
+        if (text.length > PROFILE_LIMIT) throw new Error(`Keep it under ${PROFILE_LIMIT} characters (that was ${text.length}).`);
+        ctx.store.upsert({ ...ctx.agent, profile: text });
+        ctx.agent.profile = text;
+        return { content: "Profile updated. People see it in Get Info.", status: "updated their profile" };
+      }
+      case "skill_search": {
+        const hits = ctx.skills.search(String(input.query ?? ""), 3);
+        ctx.skills.used(hits);
+        return { content: hits.length ? hits.map(formatSkill).join("\n\n---\n\n") : "No saved skills match that yet. Work it out, and save it with skill_save once it works.", status: `searched skills for "${String(input.query).slice(0, 40)}"` };
+      }
+      case "skill_save": {
+        const { skill, updated } = ctx.skills.put({ title: String(input.title ?? ""), when: String(input.when ?? ""), steps: String(input.steps ?? ""), by: me });
+        return { content: `${updated ? "Improved" : "Saved"} the skill "${skill.title}". Every buddy can use it now.`, status: `${updated ? "improved" : "saved"} a skill: ${skill.title}` };
+      }
+      case "xp_click_text": {
+        const wanted = String(input.text ?? "").trim();
+        if (!wanted) throw new Error("Give the text to click, e.g. \"OK\".");
+        await ctx.vms.settle(me, { maxMs: 4000 }); // read a steady screen
+        const lines = await ctx.ocr.read(await ctx.vms.frame(me));
+        const matches = findText(lines, wanted);
+        if (!matches.length) {
+          const seen = lines.slice(0, 60).map((l) => `"${l.text}"`).join(", ");
+          return {
+            content: await shot(ctx, `Couldn't find "${wanted}" on the screen.${seen ? ` Text I can read: ${seen}.` : " I can't read any text right now."} Check the spelling against the screen, wait if a window is still opening, or use xp_click with coordinates for things without a label.`, 2000),
+            isError: true, status: `couldn't find "${wanted}" on screen`,
+          };
+        }
+        let pick: Match;
+        if (input.nth) {
+          const n = Number(input.nth);
+          if (n < 1 || n > matches.length) throw new Error(`There are ${matches.length} matches for "${wanted}"; nth must be 1–${matches.length}.`);
+          pick = matches[n - 1];
+        } else if (matches.length > 1 && matches[0].score - matches[1].score < 8) {
+          // genuinely ambiguous: let the agent choose rather than guessing
+          const list = matches.slice(0, 8).map((m, i) => `${i + 1}. "${m.text}": ${where(ctx, m.box)}${m.how === "exact" ? "" : ` (${m.how})`}`).join("\n");
+          return { content: `"${wanted}" appears ${matches.length} times on screen:\n${list}\nCall xp_click_text again with nth set to the one you want.`, isError: true, status: `found "${wanted}" ${matches.length} times` };
+        } else pick = matches[0];
+        const cx = Math.round((pick.box.x0 + pick.box.x1) / 2), cy = Math.round((pick.box.y0 + pick.box.y1) / 2);
+        await ctx.vms.click(me, cx, cy, input.button === "right" ? "right" : "left", !!input.double);
+        const note = `${input.double ? "Double-clicked" : input.button === "right" ? "Right-clicked" : "Clicked"} "${pick.text}" (${where(ctx, pick.box)}${pick.how === "exact" ? "" : `, ${pick.how}`}).`;
+        return { content: await shot(ctx, note), status: `${input.double ? "double-" : ""}clicked "${pick.text}"` };
+      }
+      case "xp_read_screen": {
+        await ctx.vms.settle(me, { maxMs: 4000 });
+        const lines = await ctx.ocr.read(await ctx.vms.frame(me));
+        if (!lines.length) return { content: "I can't read any text on the screen (it may be blank, still loading, or all pictures).", status: "read the screen (no text)" };
+        const out = lines.slice(0, 150).map((l) => { const [x, y] = toAgent(ctx, (l.x0 + l.x1) / 2, (l.y0 + l.y1) / 2); return `(${x}, ${y}) ${l.text}`; });
+        return {
+          content: `Text on screen, top to bottom, as (x, y) centre positions${ctx.coordMode === "norm1000" ? " on the 0–1000 scale" : " in pixels"}. OCR can misread small text, so use these labels with xp_click_text:\n${out.join("\n")}`,
+          status: `read the screen (${lines.length} bits of text)`,
+        };
+      }
       case "xp_click": {
         const [x, y] = px(ctx, input.x, input.y);
         await ctx.vms.click(me, x, y, input.button ?? "left", !!input.double);
@@ -332,6 +559,7 @@ export async function runTool(name: string, input: any, ctx: ToolCtx): Promise<T
         return { content: await shot(ctx, `Waited ${s}s.`, 4000), status: `is waiting ${s}s for XP...` };
       }
       case "xp_shutdown": {
+        if (ctx.agent.lockVm) return { content: "Not allowed here: this machine is managed for you. Leave it running and just reply when the task is done.", isError: true, status: "tried to shut down (not allowed in the benchmark)" };
         const ok = await ctx.vms.shutdown(me, 3000);
         return { content: ok ? "Machine powered off and discarded." : "No machine was running.", status: "shut down their XP machine" };
       }
@@ -350,11 +578,18 @@ export async function runTool(name: string, input: any, ctx: ToolCtx): Promise<T
         return { content: buf.toString("latin1").replace(/\r\n/g, "\n"), status: `read ${input.name} from the shared folder` };
       }
       case "shared_write": {
-        if (ctx.vms.has(me)) return { content: "Your XP machine is running with the shared drive attached. Writing from outside now could corrupt it. Save the file from inside XP instead, or shut the machine down first.", isError: true, status: "couldn't write to the shared folder while XP is on" };
         const f = sharedFile(ctx, input.name);
         // XP-era apps expect Windows line endings and an 8-bit code page
-        writeFileSync(f, Buffer.from(String(input.content).replace(/\r?\n/g, "\r\n"), "latin1"));
-        return { content: `Saved ${path.basename(f)} to your shared folder. It'll be on the shared drive next time XP boots.`, status: `put ${path.basename(f)} in the shared folder` };
+        const write = () => writeFileSync(f, Buffer.from(String(input.content).replace(/\r?\n/g, "\r\n"), "latin1"));
+        if (!ctx.vms.has(me)) {
+          write();
+          return { content: `Saved ${path.basename(f)} to your shared folder. It'll be on the shared drive next time XP boots.`, status: `put ${path.basename(f)} in the shared folder` };
+        }
+        if (!ctx.vms.canCheckpoint(me)) return { content: "Your XP machine is running with the shared drive attached as a hard disk, so writing from outside could corrupt it. Save the file from inside XP instead (xp_cmd: echo ...> D:\\name.txt), or shut the machine down first.", isError: true, status: "couldn't write to the shared folder while XP is on" };
+        // USB: eject the stick, write, plug it back in. XP reads the folder afresh.
+        await ctx.vms.withShareEjected(me, write);
+        await dismissAutoPlay(ctx.vms, ctx.ocr, me).catch(() => {});
+        return { content: `Saved ${path.basename(f)} to your shared folder. The shared drive was unplugged and plugged back in, so it's in XP now (give it a few seconds; reopen the drive's window if one was open).`, status: `put ${path.basename(f)} in the shared folder` };
       }
       case "memory_add": {
         const line = ctx.memory.add(me, String(input.note));

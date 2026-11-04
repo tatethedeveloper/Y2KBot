@@ -4,18 +4,22 @@ Practical notes for an agent driving Windows XP from screenshots. Each `## id: T
 one topic the `xp_guide` tool can return. Edit freely: a copy placed in the app's data folder
 at `knowledge/xp-guide.md` overrides this one.
 
-## quickstart: The ten things that matter most
+## quickstart: The things that matter most
 
-1. **Open things with xp_run.** `notepad`, `cmd`, `explorer C:\`, `control`, `mspaint`, `wordpad`, `calc`, `taskmgr`. It beats hunting for icons every time.
-2. **The keyboard is more reliable than the mouse.** Enter presses the highlighted (default) button. Esc cancels. Tab moves between fields. Alt+F4 closes the active window.
-3. **Underlined letters are shortcuts.** Hold Alt and press the letter: alt+f opens the File menu, alt+y clicks "Yes", alt+n clicks "No". XP hides the underlines until you press Alt.
-4. **Check focus before typing.** The active window's title bar is bright blue; inactive ones are pale blue. If unsure, click inside the window first.
-5. **XP is slow here.** If nothing changed, xp_wait 3–5 seconds before trying again. Repeating a click often opens two copies or toggles something back off.
-6. **Use full paths.** Type `C:\work\notes.txt` straight into "File name:" boxes and the Run box. Put quotes around paths with spaces.
-7. **Maximise windows** (double-click the title bar) so buttons are big and in predictable places.
-8. **Close pop-ups that aren't yours** (balloon tips, "tour Windows XP", security warnings) with their X or Esc, then carry on.
-9. **Verify, don't assume.** After saving or creating something, prove it: `cmd /c dir C:\work & pause`, or open the folder.
-10. **Your shared drive is usually D:.** It's how files get in and out. Wait a few seconds after saving there before shutting down.
+0. **Files, folders and settings: use `xp_cmd`.** It runs a command line inside XP and hands you the text output in one step, with no clicking: `xp_cmd("mkdir C:\work & echo hello> C:\work\hello.txt")`, then check with `xp_cmd("type C:\work\hello.txt")`. See the `cmd` topic for commands. Keep the GUI for things only the GUI can do.
+1. **Click things by their label.** `xp_click_text("OK")`, `xp_click_text("File")`, `xp_click_text("My Computer", double=true)`. It reads the screen for you, so no pixel guessing. `xp_read_screen` lists every bit of text on screen with its position, which is handy for reading dialogs and errors.
+2. **Open things with xp_run.** `notepad`, `cmd`, `explorer C:\`, `control`, `mspaint`, `wordpad`, `calc`, `taskmgr`. It beats hunting for icons every time.
+3. **The keyboard is more reliable than the mouse.** Enter presses the highlighted (default) button. Esc cancels. Tab moves between fields. Alt+F4 closes the active window.
+4. **Underlined letters are shortcuts.** Hold Alt and press the letter: alt+f opens the File menu, alt+y clicks "Yes", alt+n clicks "No". XP hides the underlines until you press Alt.
+5. **Check focus before typing.** The active window's title bar is bright blue; inactive ones are pale blue. If unsure, click inside the window first.
+6. **XP is slow here.** If nothing changed, xp_wait 3–5 seconds before trying again. Repeating a click often opens two copies or toggles something back off.
+7. **Use full paths.** Type `C:\work\notes.txt` straight into "File name:" boxes and the Run box. Put quotes around paths with spaces.
+8. **Maximise windows** (double-click the title bar) so buttons are big and in predictable places.
+9. **Close pop-ups that aren't yours** (balloon tips, "tour Windows XP", security warnings) with their X or Esc, then carry on.
+10. **Verify, don't assume.** After saving or creating something, prove it: `xp_cmd("dir C:\work")` or `xp_cmd("type C:\work\notes.txt")`, or open the folder.
+11. **Your shared drive is usually D: or E:** (label *QEMU VVFAT*; `xp_cmd("vol D: & vol E:")` tells you). It's how files get in and out. Wait a few seconds after saving there before shutting down.
+12. **Checkpoint before risky steps.** `xp_checkpoint("before install")` saves the whole machine; if things go wrong, `xp_undo()` puts it back exactly, which is quicker and safer than repairing by hand.
+13. **Reuse what worked.** `skill_search("rename file")` finds recipes buddies saved before. When you finish a multi-step task that worked, `skill_save` the steps.
 
 ## layout: What the screen looks like
 
@@ -113,7 +117,15 @@ These dialogs look the same in most programs:
 
 ## cmd: Command Prompt
 
-Open it with xp_run `cmd`. To run one command and see the output before the window closes, use `cmd /k <command>` (stays open) or `cmd /c <command> & pause`.
+**Best way: `xp_cmd`.** It runs one command line and returns the output as text, so you don't need to open a window or read the screen. Chain steps with `&`. Examples:
+- `xp_cmd("mkdir C:\work & echo first line> C:\work\notes.txt & echo second line>> C:\work\notes.txt")`
+- `xp_cmd("ren C:\work\notes.txt todo.txt & dir /b C:\work")`
+- `xp_cmd("type C:\work\todo.txt")` to check what's in a file.
+- `xp_cmd("start \"\" notepad C:\work\todo.txt")` opens a program without waiting for it to close.
+- It reports whether the command succeeded (exit code 0). A command that waits for typing (like `pause`, `more`, `date` with no arguments) will hang until the timeout, so avoid those.
+- Your command runs inside `( … )`, so write a literal `)` in echo text as `^)`.
+
+By hand: open a window with xp_run `cmd`. To run one command and see the output before the window closes, use `cmd /k <command>` (stays open) or `cmd /c <command> & pause`.
 
 Useful commands:
 - `dir` lists the folder. `dir /b` gives bare names; `dir C:\work\*.txt` filters.
@@ -163,7 +175,8 @@ Settings dialogs use tabs along the top: click a tab name, or use ctrl+tab to cy
 
 ## install: Installing a program
 
-1. Put the installer in the shared folder before booting (the user can drop it on your IM window), or check `D:\` with xp_run `D:\`.
+0. **Take a checkpoint first:** `xp_checkpoint("before install")`. If the install goes wrong, `xp_undo()` puts the machine back.
+1. Put the installer in the shared folder (the user can drop it on your IM window, or use `shared_write` for text files), and find it on the shared drive: `xp_cmd("dir /b D:\ & dir /b E:\")`.
 2. Run it: xp_run `D:\setup.exe` (use the real file name; `.msi` files work the same way).
 3. Most installers are wizards: press **enter** (Next) to move on. The licence page usually needs "I accept" ticked first: alt+a, or click the radio button, then Next. Leave the install folder as the default unless told otherwise.
 4. Wait for the progress bar with xp_wait, since installs are slow here. Finish with **Finish** (enter).
@@ -194,18 +207,22 @@ Settings dialogs use tabs along the top: click a tab name, or use ctrl+tab to cy
 
 - **Nothing happened after an action:** xp_wait 3–5s. Check the taskbar for a new button, since the window may have opened behind another one. Use alt+tab to look.
 - **Typed text went to the wrong place:** focus was elsewhere. Undo with ctrl+z, click inside the right field or window, then retype.
-- **A click missed:** look at the red crosshair in the screenshot to see where the pointer actually went, then adjust. Maximise the window to make targets bigger.
+- **A click missed:** if the thing has a label, use `xp_click_text("label")` instead. Otherwise look at the red crosshair in the screenshot to see where the pointer actually went, then adjust. Maximise the window to make targets bigger.
+- **xp_click_text can't find a label:** call `xp_read_screen` to see exactly how the text reads (OCR sometimes merges or splits words), then use that spelling. Very small or decorative text may not be readable; fall back to the keyboard or xp_click.
 - **A menu or drop-down is open and in the way:** press esc (once or twice).
 - **A program is frozen ("Not Responding" in the title):** wait 10s. If it's still frozen, ctrl+shift+esc → Applications → End Task.
 - **Lost track of what's open:** win+d shows the desktop, and the taskbar lists every window.
 - **The screen is black or the screensaver is on:** move the mouse a little (click an empty area) or press shift.
 - **Something keeps failing the same way:** stop repeating it and try a different route (keyboard instead of mouse, cmd instead of the GUI). After two or three failures, tell the user what you see.
-- **The machine is in a bad state:** xp_shutdown then xp_boot gives a completely fresh XP (nothing is saved except the shared drive).
+- **A step made a mess** (wrong settings, a broken install, deleted the wrong file): `xp_undo()` goes back to your last checkpoint. That's why you take one before risky steps.
+- **xp_cmd says nothing came back from COM1:** take a screenshot; the console window shows what happened (maybe a typo). If it keeps failing, use the GUI or `cmd /c ... > D:\out.txt` and read the file after shutdown.
+- **The machine is in a bad state and there's no checkpoint:** xp_shutdown then xp_boot gives a completely fresh XP (nothing is saved except the shared drive).
 
 ## shared-drive: Getting files in and out
 
-- The buddy's shared folder appears in XP as an extra drive, usually `D:`. Check *My Computer* (xp_run `explorer`) if not.
-- **Files in:** anything in the folder before boot (including files the user drops on the IM window) appears on that drive. Files added while XP is running won't show until the next boot.
-- **Files out:** save or copy files to `D:\` inside XP. They land in the folder on the user's computer. Wait a few seconds after saving before xp_shutdown so Windows finishes writing.
-- From outside XP, use `shared_files`, `shared_read` and `shared_write` (writing only works while XP is off).
-- Quick copy-out from cmd: `copy C:\work\result.txt D:\`.
+- The buddy's shared folder appears in XP as a removable drive labelled *QEMU VVFAT*, usually `D:` or `E:`. `xp_cmd("vol D: & vol E:")` shows which, or check *My Computer*.
+- **Files in:** anything in the folder at boot (including files the user drops on the IM window) appears on that drive. `shared_write` adds a text file even while XP is running: the drive is unplugged and plugged back in, so it shows up straight away.
+- **Files out:** save or copy files to the shared drive inside XP. They land in the folder on the user's computer. Wait a few seconds after saving before xp_shutdown so Windows finishes writing.
+- From outside XP, use `shared_files`, `shared_read` and `shared_write`.
+- Quick copy-out: `xp_cmd("copy C:\work\result.txt D:\")`.
+- If an "AutoPlay" window pops up asking what to do with the drive, press esc.

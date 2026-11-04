@@ -2,6 +2,7 @@
 // content blocks); each adapter translates to and from its own API.
 //
 //   anthropic          → Anthropic Messages API
+//   chatgpt            → Responses API on your ChatGPT Plus/Pro plan (see chatgpt.ts)
 //   everything else    → OpenAI-compatible Chat Completions (OpenAI, Ollama, OpenRouter,
 //                        Gemini, Groq, LM Studio, vLLM, llama.cpp, Together, Mistral, ...)
 import Anthropic from "@anthropic-ai/sdk";
@@ -24,6 +25,8 @@ export interface CompleteResult {
 
 export interface ModelInfo {
   id: string;
+  /** a friendlier name to show, when the provider gives one */
+  label?: string;
   /** what it can do, when the provider says: "vision", "tools", ... */
   caps?: string[];
 }
@@ -36,13 +39,15 @@ export interface Provider {
   complete(a: CompleteArgs): Promise<CompleteResult>;
   /** Models this provider offers right now. */
   listModels(): Promise<ModelInfo[]>;
+  /** Show models in the provider's own order instead of alphabetically. */
+  keepOrder?: boolean;
 }
 
 // ---------------------------------------------------------------- presets
 export interface Preset {
   id: string;
   label: string;
-  kind: "anthropic" | "openai";
+  kind: "anthropic" | "openai" | "chatgpt";
   baseURL?: string;
   keyEnv?: string;      // env var holding the API key
   urlEnv?: string;      // env var that overrides the base URL
@@ -52,6 +57,8 @@ export interface Preset {
 
 export const PRESETS: Preset[] = [
   { id: "anthropic", label: "Anthropic", kind: "anthropic", keyEnv: "ANTHROPIC_API_KEY", needsKey: true, exampleModel: "claude-sonnet-5-5" },
+  // Sign in with ChatGPT: no key, the server plugs in ChatGPTProvider. "auto" = the first model your plan lists.
+  { id: "chatgpt", label: "ChatGPT (Plus/Pro plan)", kind: "chatgpt", needsKey: false, exampleModel: "auto" },
   { id: "openai", label: "OpenAI", kind: "openai", baseURL: "https://api.openai.com/v1", keyEnv: "OPENAI_API_KEY", urlEnv: "OPENAI_BASE_URL", needsKey: true, exampleModel: "gpt-5" },
   { id: "ollama", label: "Ollama (local)", kind: "openai", baseURL: "http://localhost:11434/v1", keyEnv: "OLLAMA_API_KEY", urlEnv: "OLLAMA_BASE_URL", needsKey: false, exampleModel: "qwen2.5vl:7b" },
   { id: "openrouter", label: "OpenRouter", kind: "openai", baseURL: "https://openrouter.ai/api/v1", keyEnv: "OPENROUTER_API_KEY", needsKey: true, exampleModel: "anthropic/claude-sonnet-5.5" },
@@ -69,11 +76,15 @@ export class ProviderRegistry {
       const key = p.keyEnv ? env[p.keyEnv] ?? "" : "";
       const baseURL = (p.urlEnv && env[p.urlEnv]) || p.baseURL || "";
       if (p.kind === "anthropic") this.map.set(p.id, new AnthropicProvider(p, key));
-      else this.map.set(p.id, new OpenAICompatProvider(p, baseURL, key));
+      else if (p.kind === "openai") this.map.set(p.id, new OpenAICompatProvider(p, baseURL, key));
     }
   }
 
+  /** Plug in a provider that needs more than a key (e.g. ChatGPT sign-in). */
+  add(p: Provider) { this.map.set(p.id, p); this.modelCache.delete(p.id); }
   get(id: string) { return this.map.get(id); }
+  /** Forget cached models (e.g. after signing in to a different account). */
+  forgetModels(id: string) { this.modelCache.delete(id); }
 
   private modelCache = new Map<string, { at: number; models: ModelInfo[] }>();
   /** Cached for a minute; force=true refreshes. */
@@ -83,7 +94,8 @@ export class ProviderRegistry {
     if (!p.ready) throw new Error(`${p.label} isn't set up yet.`);
     const hit = this.modelCache.get(id);
     if (hit && !force && Date.now() - hit.at < 60_000) return hit.models;
-    const models = (await p.listModels()).sort((a, b) => a.id.localeCompare(b.id));
+    const listed = await p.listModels();
+    const models = p.keepOrder ? listed : listed.sort((a, b) => a.id.localeCompare(b.id));
     this.modelCache.set(id, { at: Date.now(), models });
     return models;
   }

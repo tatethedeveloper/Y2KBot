@@ -8,6 +8,14 @@ release/
 data/
 mcp.json
 settings.json
+chatgpt-signin.json
+approvals.json
+skills.json
+logs/
+
+# scratch / test leftovers
+.scratch/
+*.tmp
 
 # Windows XP disk images and install media (licensed software, and huge)
 *.qcow2

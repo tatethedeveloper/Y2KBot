@@ -1,6 +1,7 @@
 [
   {
     "screenName": "0racle2001",
+    "icon": "globe",
     "group": "Buddies",
     "color": "#c00000",
     "profile": "ask me anything. i know stuff. ~*~ the oracle sees all ~*~",
@@ -10,6 +11,7 @@
   },
   {
     "screenName": "c0deMonkey99",
+    "icon": "monitor",
     "group": "Buddies",
     "color": "#006400",
     "profile": "/* i write code. i eat bananas. */",
@@ -19,6 +21,7 @@
   },
   {
     "screenName": "xp_r0b0t",
+    "icon": "robot",
     "group": "XP Crew",
     "color": "#0000c0",
     "profile": "i drive windows xp so you dont have to. beep boop.",
@@ -28,6 +31,7 @@
   },
   {
     "screenName": "DialUpDave",
+    "icon": "floppy",
     "group": "XP Crew",
     "color": "#8b008b",
     "profile": "56k warrior. legacy software whisperer. if it ran on XP i can make it run again.",
@@ -37,6 +41,7 @@
   },
   {
     "screenName": "Coordin8r",
+    "icon": "note",
     "group": "Co-Workers",
     "color": "#b8860b",
     "profile": "project manager. i split big jobs up and IM the right buddy.",

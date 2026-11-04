@@ -15,4 +15,7 @@ contextBridge.exposeInMainWorld("ramNative", {
   pickFile: (opts) => ipcRenderer.invoke("ram:pickFile", opts),
   relaunch: () => ipcRenderer.send("ram:relaunch"),
   openPath: (p) => ipcRenderer.send("ram:openPath", p),
+  openDataFolder: (sub) => ipcRenderer.send("ram:openDataFolder", sub),          // e.g. "logs"
+  saveText: (opts) => ipcRenderer.invoke("ram:saveText", opts),                  // { defaultName, filters, text } → saved path or null
+  openText: (opts) => ipcRenderer.invoke("ram:openText", opts),                  // { filters, title } → { name, text } or null
 });

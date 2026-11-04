@@ -21,10 +21,23 @@ export interface ServerConfig {
   command?: string; args?: string[]; env?: Record<string, string>; cwd?: string;
   url?: string; headers?: Record<string, string>; type?: "stdio" | "http" | "sse" | "streamable-http";
   disabled?: boolean;
+  /** Ask the user before calling this server's tools: "risky" (default: anything not marked read-only), "always" or "never". */
+  approve?: "risky" | "always" | "never";
 }
+
+/** What a buddy is about to do with an MCP tool, for the "Are you sure?" dialog. */
+export interface ToolRisk { server: string; tool: string; title: string; ask: boolean; why: string }
 export interface ServerStatus { name: string; state: "connecting" | "connected" | "error" | "disabled"; error?: string; tools: string[]; kind: string }
 
-interface Conn { name: string; client?: Client; status: ServerStatus; tools: Anthropic.Tool[]; map: Map<string, string> }
+interface Conn {
+  name: string; client?: Client; status: ServerStatus; tools: Anthropic.Tool[]; map: Map<string, string>;
+  approve: "risky" | "always" | "never";
+  /** per real tool name: what the server says about it */
+  hints: Map<string, { readOnly?: boolean; destructive?: boolean; title?: string }>;
+}
+
+// Tool names that only look things up. Used when a server doesn't say whether a tool is read-only.
+const LOOKS_READ_ONLY = /^(get|list|read|search|find|fetch|query|describe|show|view|lookup|count|check|status|info|inspect|browse|preview)([_\-.A-Z]|$)/i;
 
 const TOOL_TIMEOUT = 120_000;
 const EXAMPLE = `{
@@ -64,7 +77,8 @@ export class McpManager extends EventEmitter {
     catch (e) { this.emit("changed"); throw e; }
     for (const [name, cfg] of Object.entries(servers)) {
       const kind = cfg.url ? (cfg.type === "sse" ? "sse" : "http") : "stdio";
-      const conn: Conn = { name, status: { name, state: cfg.disabled ? "disabled" : "connecting", tools: [], kind }, tools: [], map: new Map() };
+      const approve = cfg.approve === "always" || cfg.approve === "never" ? cfg.approve : "risky";
+      const conn: Conn = { name, status: { name, state: cfg.disabled ? "disabled" : "connecting", tools: [], kind }, tools: [], map: new Map(), approve, hints: new Map() };
       this.conns.set(name, conn);
     }
     this.emit("changed");
@@ -104,6 +118,8 @@ export class McpManager extends EventEmitter {
         let full = `mcp__${safe(name)}__${safe(t.name)}`.slice(0, 64);
         while (conn.map.has(full)) full = full.slice(0, 60) + Math.random().toString(36).slice(2, 5);
         conn.map.set(full, t.name);
+        const a: any = (t as any).annotations ?? {};
+        conn.hints.set(t.name, { readOnly: a.readOnlyHint, destructive: a.destructiveHint, title: a.title ?? (t as any).title });
         conn.tools.push({
           name: full,
           description: `[MCP: ${name}] ${t.description ?? t.name}`.slice(0, 1024),
@@ -127,6 +143,25 @@ export class McpManager extends EventEmitter {
   }
 
   owns(toolName: string) { return toolName.startsWith("mcp__"); }
+
+  /** Should the user be asked before this tool runs? */
+  risk(toolName: string): ToolRisk | null {
+    for (const c of this.conns.values()) {
+      const real = c.map.get(toolName);
+      if (!real) continue;
+      const h = c.hints.get(real) ?? {};
+      const base = { server: c.name, tool: real, title: h.title || real };
+      if (c.approve === "never") return { ...base, ask: false, why: "approvals are off for this server" };
+      if (c.approve === "always") return { ...base, ask: true, why: "this server is set to always ask" };
+      if (h.readOnly === true) return { ...base, ask: false, why: "the server marks it read-only" };
+      if (h.destructive === true) return { ...base, ask: true, why: "the server says it can delete or overwrite things" };
+      if (h.readOnly === false) return { ...base, ask: true, why: "the server says it can change things" };
+      return LOOKS_READ_ONLY.test(real)
+        ? { ...base, ask: false, why: "its name says it only looks things up" }
+        : { ...base, ask: true, why: "it might change, send or delete something" };
+    }
+    return null;
+  }
 
   async call(toolName: string, args: unknown, allowed: string[] | "all" | undefined): Promise<{ content: Anthropic.ToolResultBlockParam["content"]; isError: boolean; server: string; tool: string }> {
     for (const c of this.conns.values()) {

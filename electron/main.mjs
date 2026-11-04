@@ -50,9 +50,11 @@ const DEFAULTS = {
   xpCpu: "pentium3", // newer CPU models make XP blue-screen with STOP 0xA
   xpAcpi: false,     // must match how XP was installed
   xpShare: true,
+  xpShareBus: "usb", // "usb" (allows checkpoints/undo) or "ide" (an extra hard disk, the old way)
   searchProvider: "", // "", "brave", "tavily", "searxng"
   searxngUrl: "",
   webAllowPrivate: false,
+  chatLogs: false, // keep a log file of every conversation (data folder → logs)
 };
 
 // provider id → env vars the server reads (see server/src/providers.ts)
@@ -62,6 +64,8 @@ const KEY_ENV = {
   brave: "BRAVE_API_KEY", tavily: "TAVILY_API_KEY", // web search
 };
 const URL_ENV = { openai: "OPENAI_BASE_URL", ollama: "OLLAMA_BASE_URL", lmstudio: "LMSTUDIO_BASE_URL", custom: "CUSTOM_BASE_URL" };
+// providers you sign in to instead of pasting a key (handled by the server, see server/src/chatgpt.ts)
+const SIGN_IN = new Set(["chatgpt"]);
 
 function readSettings() {
   let s;
@@ -93,14 +97,16 @@ function writeSettings(input) {
   next.xpMemoryMb = Math.max(128, Math.min(4096, Number(next.xpMemoryMb) || 512));
   next.xpMaxVms = Math.max(1, Math.min(8, Number(next.xpMaxVms) || 2));
   if (!["none", "restricted", "user"].includes(next.xpNetwork)) next.xpNetwork = "none";
-  if (!(next.provider in KEY_ENV) && !(next.provider in URL_ENV)) next.provider = "anthropic";
+  if (!(next.provider in KEY_ENV) && !(next.provider in URL_ENV) && !SIGN_IN.has(next.provider)) next.provider = "anthropic";
   if (!["", "tcg", "whpx", "kvm", "hvf"].includes(next.xpAccel)) next.xpAccel = "";
   if (!["pentium3", "coreduo", "qemu32", "max"].includes(next.xpCpu)) next.xpCpu = "pentium3";
   next.xpAcpi = !!next.xpAcpi;
   next.xpShare = next.xpShare !== false;
+  if (!["usb", "ide"].includes(next.xpShareBus)) next.xpShareBus = "usb";
   if (!["", "brave", "tavily", "searxng"].includes(next.searchProvider)) next.searchProvider = "";
   next.searxngUrl = /^https?:\/\//.test(String(next.searxngUrl || "").trim()) ? String(next.searxngUrl).trim() : "";
   next.webAllowPrivate = !!next.webAllowPrivate;
+  next.chatLogs = !!next.chatLogs;
   for (const [id, v] of Object.entries(input.baseUrls || {})) {
     if (!(id in URL_ENV)) continue;
     const url = String(v || "").trim();
@@ -132,18 +138,20 @@ function applySettingsToEnv() {
   process.env.XP_CPU = s.xpCpu || "pentium3";
   process.env.XP_ACPI = s.xpAcpi ? "on" : "off";
   process.env.XP_SHARE = s.xpShare === false ? "0" : "1";
+  process.env.XP_SHARE_BUS = s.xpShareBus === "ide" ? "ide" : "usb";
   process.env.SEARCH_PROVIDER = s.searchProvider || "";
   if (s.searxngUrl) process.env.SEARXNG_URL = s.searxngUrl;
   process.env.WEB_ALLOW_PRIVATE = s.webAllowPrivate ? "1" : "0";
+  process.env.CHAT_LOGS = s.chatLogs ? "1" : "0";
 }
 
 // ---------------- windows ----------------
 const SIZES = {
   signon: [250, 470], buddylist: [240, 580], im: [440, 420], viewer: [720, 620],
   info: [380, 420], editor: [420, 720], help: [400, 380], prefs: [470, 860],
-  room: [620, 480], invite: [330, 420], mcp: [500, 600],
+  room: [620, 480], invite: [330, 420], mcp: [500, 600], bench: [720, 780], skills: [480, 620], approve: [420, 330],
 };
-const FIXED = new Set(["signon", "info", "help"]);
+const FIXED = new Set(["signon", "info", "help", "approve"]);
 const wins = new Map(); // "view:arg" -> BrowserWindow
 let base = "";
 let srv = null;
@@ -154,7 +162,7 @@ let quitting = false;
 function placement(view, w, h) {
   const wa = screen.getPrimaryDisplay().workArea;
   if (view === "buddylist") return { x: wa.x + wa.width - w - 24, y: wa.y + 24 };
-  if (["signon", "prefs", "editor", "help", "info", "invite", "mcp"].includes(view))
+  if (["signon", "prefs", "editor", "help", "info", "invite", "mcp", "skills", "approve"].includes(view))
     return { x: Math.round(wa.x + (wa.width - w) / 2), y: Math.round(wa.y + Math.max(20, (wa.height - h) / 2)) };
   if (view === "viewer") return { x: wa.x + Math.max(20, wa.width - w - 300), y: wa.y + 40 };
   const n = cascade++ % 8;
@@ -228,9 +236,17 @@ ipcMain.on("ram:open", (_e, o) => open(o || {}));
 ipcMain.on("ram:close", (e) => fromEvent(e)?.close());
 ipcMain.on("ram:minimize", (e) => fromEvent(e)?.minimize());
 ipcMain.on("ram:flash", (e) => { const w = fromEvent(e); if (w && !w.isFocused()) w.flashFrame(true); });
+// Size a dialog to its content, as tall as the screen allows, and keep it fully on screen.
 ipcMain.on("ram:fit", (e, h) => {
   const w = fromEvent(e);
-  if (w && Number.isFinite(h)) { const [cw] = w.getContentSize(); w.setContentSize(cw, Math.min(900, Math.max(120, Math.round(h)))); }
+  if (!w || !Number.isFinite(h)) return;
+  const wa = screen.getDisplayMatching(w.getBounds()).workArea;
+  const frame = w.getSize()[1] - w.getContentSize()[1]; // 0 for our frameless windows, but just in case
+  const [cw] = w.getContentSize();
+  w.setContentSize(cw, Math.max(120, Math.min(Math.round(h), wa.height - frame - 16)));
+  const b = w.getBounds();
+  const y = Math.max(wa.y + 8, Math.min(b.y, wa.y + wa.height - b.height - 8));
+  if (y !== b.y) w.setPosition(b.x, y);
 });
 ipcMain.on("ram:signedOn", (e) => { open({ view: "buddylist" }); fromEvent(e)?.close(); });
 ipcMain.on("ram:signOff", () => signOff());
@@ -240,6 +256,26 @@ ipcMain.on("ram:openPath", (_e, p) => {
   const target = path.resolve(String(p || ""));
   const root = path.resolve(userDir()) + path.sep;
   if (target.startsWith(root) && fs.existsSync(target)) shell.openPath(target);
+});
+// Folders inside the data folder the UI may open (created if missing).
+ipcMain.on("ram:openDataFolder", (_e, sub) => {
+  if (!["logs", "shared", "memory", "bench"].includes(sub)) return;
+  const dir = path.join(userDir(), sub);
+  fs.mkdirSync(dir, { recursive: true });
+  shell.openPath(dir);
+});
+ipcMain.handle("ram:saveText", async (e, o = {}) => {
+  const r = await dialog.showSaveDialog(fromEvent(e), { defaultPath: path.join(app.getPath("documents"), String(o.defaultName || "untitled.txt").replace(/[\\/:*?"<>|]/g, "_")), filters: o.filters });
+  if (r.canceled || !r.filePath) return null;
+  fs.writeFileSync(r.filePath, String(o.text ?? ""));
+  return r.filePath;
+});
+ipcMain.handle("ram:openText", async (e, o = {}) => {
+  const r = await dialog.showOpenDialog(fromEvent(e), { properties: ["openFile"], filters: o.filters, title: o.title });
+  if (r.canceled || !r.filePaths[0]) return null;
+  const f = r.filePaths[0];
+  if (fs.statSync(f).size > 1024 * 1024) throw new Error("That file is too big.");
+  return { name: path.basename(f), text: fs.readFileSync(f, "utf8") };
 });
 ipcMain.handle("ram:getSettings", () => {
   const { keys, ...rest } = readSettings();
@@ -270,8 +306,12 @@ app.whenReady().then(async () => {
   const { startServer } = await import(pathToFileURL(path.join(root, "dist/server.js")).href);
   const preferred = Number(process.env.RAM_PORT || 47823); // fixed port keeps your saved screen name
   const dataDir = userDir(); // memory notes + shared folders live next to settings.json
-  try { srv = await startServer({ port: preferred, host: "127.0.0.1", agentsFile, dataDir }); }
-  catch { srv = await startServer({ port: 0, host: "127.0.0.1", agentsFile, dataDir }); }
+  // Sign-in tokens (ChatGPT plan) are encrypted with the OS keychain, like API keys.
+  const secrets = safeStorage.isEncryptionAvailable()
+    ? { encrypt: (t) => safeStorage.encryptString(t).toString("base64"), decrypt: (t) => safeStorage.decryptString(Buffer.from(t, "base64")) }
+    : undefined;
+  try { srv = await startServer({ port: preferred, host: "127.0.0.1", agentsFile, dataDir, secrets }); }
+  catch { srv = await startServer({ port: 0, host: "127.0.0.1", agentsFile, dataDir, secrets }); }
   base = `http://127.0.0.1:${srv.port}/`;
   if (isMac) app.dock?.setIcon(path.join(root, "assets/icon.png"));
   setupTray();

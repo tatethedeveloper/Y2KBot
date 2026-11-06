@@ -41,13 +41,16 @@ The installed app checks GitHub Releases at startup (and every 6 hours). When th
 
 On Windows and with the Linux AppImage the update installs itself. macOS only lets signed apps update themselves, so on a Mac (and with the .deb) **Download…** opens the releases page instead.
 
-**Publishing a release** (maintainers): bump `version` in `package.json`, then run
+**Publishing a release** (maintainers): GitHub builds all three installers for you.
 
-```bash
-GH_TOKEN=<a token with repo access> npm run release   # PowerShell: $env:GH_TOKEN="..."; npm run release
-```
+1. Bump `version` in `package.json` (e.g. `0.3.0`) and commit.
+2. Tag and push: `git tag v0.3.0` then `git push origin main --tags`.
+3. The **Release** workflow (`.github/workflows/release.yml`) builds the Windows installer, the macOS disk images (Intel and Apple Silicon) and the Linux AppImage and .deb, and uploads them with the files the updater reads to a **draft** release. It takes about 15 minutes; watch it under **Actions**.
+4. Open the draft under **Releases**, edit the notes (GitHub fills in a list of changes) and press **Publish**. Installed apps only see a release once it's published.
 
-This builds the installer and uploads it, with the `latest.yml` file the updater reads, to a **draft** release for that version. Add the release notes on GitHub and press **Publish**. Apps only see a release once it's published.
+The tag has to match the version in `package.json`, or the workflow stops before building. To try a build without releasing anything, run the workflow by hand (**Actions → Release → Run workflow**); the installers are attached to the run as downloads. Every push also runs a quick **CI** check that the project installs and builds.
+
+You can still build one locally with `npm run dist`, or publish from your own machine with `GH_TOKEN=<token> npm run release`.
 
 ### Where your data lives
 

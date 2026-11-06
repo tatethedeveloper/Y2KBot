@@ -1,0 +1,35 @@
+# Every push and pull request: install, typecheck and build, so a broken change shows up before a release.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Check the desktop shell and UI parse
+        run: |
+          node --check electron/main.mjs
+          node --check electron/preload.cjs
+          node -e "new Function(require('fs').readFileSync('web/app.js','utf8'))"
+      - name: Check the buddy gallery files
+        run: |
+          node -e "
+            const fs = require('fs');
+            for (const f of fs.readdirSync('buddies').filter((n) => n.endsWith('.y2kbuddy'))) {
+              const j = JSON.parse(fs.readFileSync('buddies/' + f, 'utf8'));
+              if (j.format !== 'y2kbot-buddy' || !j.buddy?.screenName) throw new Error(f + ' is not a valid buddy file');
+            }
+            console.log('buddy files OK');
+          "

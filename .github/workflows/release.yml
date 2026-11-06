@@ -1,0 +1,100 @@
+# Builds the Windows, macOS and Linux installers.
+#
+# - Push a tag like v0.3.0 (matching "version" in package.json): builds all three and uploads them,
+#   with the files the auto-updater reads, to a DRAFT release for that tag. Check it on GitHub, edit
+#   the notes and press Publish. Installed apps only see a release once it's published.
+# - Run it by hand (Actions → Release → Run workflow): builds all three without releasing anything;
+#   the installers are attached to the run as downloads, for testing.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Check version and create draft
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Check the tag matches package.json
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME doesn't match package.json version $VERSION. Bump the version or retag."
+              exit 1
+            fi
+            echo "publish=always" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=never" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create the draft release (so all three builds upload to the same one)
+        if: steps.v.outputs.publish == 'always'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ steps.v.outputs.version }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; builds will upload to it."
+          else
+            gh release create "$TAG" --draft --title "Y2Kbot ${{ steps.v.outputs.version }}" --generate-notes
+          fi
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            args: --win
+          - name: macOS
+            os: macos-latest
+            args: --mac --x64 --arm64
+          - name: Linux
+            os: ubuntu-latest
+            args: --linux
+    runs-on: ${{ matrix.os }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Not code-signed yet: stop electron-builder looking for a signing certificate.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Build installers
+        run: npx electron-builder ${{ matrix.args }} --publish ${{ needs.prepare.outputs.publish }}
+      - name: Attach the installers to this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: Y2Kbot-${{ needs.prepare.outputs.version }}-${{ matrix.name }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.deb
+            release/*.yml
+          if-no-files-found: error
+          retention-days: 14

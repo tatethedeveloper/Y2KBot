@@ -1,10 +1,15 @@
 {
   "name": "y2kbot",
   "version": "0.2.0",
-  "private": true,
   "description": "Y2Kbot: an agent harness that looks like a turn-of-the-millennium instant messenger. Every buddy is an AI agent; some can boot Windows XP VMs.",
   "author": "Y2Kbot contributors",
   "license": "MIT",
+  "homepage": "https://github.com/tatethedeveloper/Y2KBot",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tatethedeveloper/Y2KBot.git"
+  },
+  "private": true,
   "keywords": [
     "ai",
     "agents",
@@ -83,7 +88,8 @@
     },
     "mac": {
       "target": [
-        "dmg"
+        "dmg",
+        "zip"
       ],
       "category": "public.app-category.productivity"
     },
@@ -92,7 +98,9 @@
         "AppImage",
         "deb"
       ],
-      "category": "Network"
+      "category": "Network",
+      "maintainer": "Y2Kbot contributors <y2kbot@users.noreply.github.com>",
+      "synopsis": "AI agents on a millennium-era buddy list"
     },
     "asarUnpack": [
       "node_modules/tesseract.js/**",
@@ -106,6 +114,7 @@
         "repo": "Y2KBot",
         "releaseType": "draft"
       }
-    ]
+    ],
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
   }
 }

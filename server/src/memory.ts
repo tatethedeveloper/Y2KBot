@@ -1,26 +1,38 @@
 // Long-term memory: one small markdown notes file per buddy, kept between sessions.
 // The whole file is put in the buddy's system prompt each turn; the buddy edits it with tools.
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
+import { safeSegment } from "./agents.js";
 
 export const MEMORY_LIMIT = 6000; // characters per buddy
 
 export class MemoryStore {
+  /** file → its text as of mtime, so the buddy list doesn't re-read every notes file on each update */
+  private cache = new Map<string, { mtime: number; text: string }>();
+
   constructor(private dir: string) {
     mkdirSync(dir, { recursive: true });
   }
 
   private file(name: string) {
-    return path.join(this.dir, name.replace(/[^\w.\- ]/g, "_") + ".md");
+    return path.join(this.dir, safeSegment(name) + ".md");
   }
 
   get(name: string): string {
     const f = this.file(name);
-    return existsSync(f) ? readFileSync(f, "utf8") : "";
+    if (!existsSync(f)) return "";
+    const mtime = statSync(f).mtimeMs;
+    const hit = this.cache.get(f);
+    if (hit && hit.mtime === mtime) return hit.text;
+    const text = readFileSync(f, "utf8");
+    this.cache.set(f, { mtime, text });
+    return text;
   }
 
   set(name: string, text: string) {
-    writeFileSync(this.file(name), text.trim() ? text.trim() + "\n" : "");
+    const f = this.file(name);
+    writeFileSync(f, text.trim() ? text.trim() + "\n" : "");
+    this.cache.delete(f);
   }
 
   add(name: string, note: string): string {
@@ -48,5 +60,6 @@ export class MemoryStore {
 
   clear(name: string) {
     rmSync(this.file(name), { force: true });
+    this.cache.delete(this.file(name));
   }
 }

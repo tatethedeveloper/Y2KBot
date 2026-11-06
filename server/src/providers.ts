@@ -8,6 +8,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 
 export type Msg = Anthropic.MessageParam;
+
+/** Give up on a model call after this long (the Anthropic SDK's own default), so a stalled server can't hang a buddy. */
+export const MODEL_TIMEOUT_MS = 10 * 60_000;
 export type Block = Anthropic.TextBlockParam | Anthropic.ToolUseBlockParam;
 
 export interface CompleteArgs {
@@ -179,7 +182,7 @@ class OpenAICompatProvider implements Provider {
         ...(this.id === "openrouter" ? { "HTTP-Referer": "https://github.com/y2kbot", "X-Title": "Y2Kbot" } : {}),
       },
       body: JSON.stringify(body),
-      signal: a.signal,
+      signal: AbortSignal.any([a.signal, AbortSignal.timeout(MODEL_TIMEOUT_MS)]),
     }).catch((e) => {
       if (a.signal.aborted) throw e;
       throw new Error(`${this.label}: couldn't reach ${this.baseURL} (${(e as Error).message})${this.id === "ollama" || this.id === "lmstudio" ? " — is it running?" : ""}`);

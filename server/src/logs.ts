@@ -2,6 +2,7 @@
 // as plain text or a small web page. Also used for File → Save Conversation.
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
+import { safeSegment } from "./agents.js";
 
 export interface LogItem {
   type: string; // "im" | "event"
@@ -52,7 +53,7 @@ export class ChatLogger {
 
   fileFor(window: string, at?: number) {
     const folder = window.startsWith("#") ? `room-${window.slice(1)}` : window;
-    return path.join(this.dir, folder.replace(/[^\w.\- ]/g, "_"), `${day(at)}.html`);
+    return path.join(this.dir, safeSegment(folder), `${day(at)}.html`);
   }
 
   append(window: string, it: LogItem, me: string) {

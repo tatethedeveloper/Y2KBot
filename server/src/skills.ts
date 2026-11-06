@@ -34,7 +34,10 @@ export class SkillStore extends EventEmitter {
     try { this.skills = JSON.parse(readFileSync(file, "utf8")); } catch { this.skills = []; }
   }
 
+  private saveSoon: NodeJS.Timeout | null = null;
+
   private save() {
+    if (this.saveSoon) { clearTimeout(this.saveSoon); this.saveSoon = null; } // this save includes the pending counts
     mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = this.file + ".tmp";
     writeFileSync(tmp, JSON.stringify(this.skills, null, 2));
@@ -90,11 +93,13 @@ export class SkillStore extends EventEmitter {
       .map((x) => x.s);
   }
 
-  /** Count that these were handed to a buddy. */
+  /** Count that these were handed to a buddy. Saved a few seconds later, so busy turns don't rewrite the file each time. */
   used(skills: Skill[]) {
     if (!skills.length) return;
     for (const s of skills) s.uses++;
-    this.save();
+    if (this.saveSoon) return;
+    this.saveSoon = setTimeout(() => { this.saveSoon = null; try { this.save(); } catch { /* counts are best-effort */ } }, 5000);
+    this.saveSoon.unref?.();
   }
 }
 

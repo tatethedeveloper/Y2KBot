@@ -69,10 +69,16 @@ export class QMP {
     this.pending.clear();
   }
 
-  cmd<T = any>(execute: string, args?: Record<string, unknown>): Promise<T> {
+  /** Long-running work (snapshots) runs as QEMU jobs, so no single command should take this long. */
+  cmd<T = any>(execute: string, args?: Record<string, unknown>, timeoutMs = 30_000): Promise<T> {
+    if (!this.sock || this.sock.destroyed) return Promise.reject(new Error("QMP socket closed"));
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const t = setTimeout(() => {
+        if (this.pending.delete(id)) reject(new Error(`QEMU didn't answer ${execute} within ${Math.round(timeoutMs / 1000)}s`));
+      }, timeoutMs);
+      const done = <A extends unknown[]>(f: (...a: A) => void) => (...a: A) => { clearTimeout(t); f(...a); };
+      this.pending.set(id, { resolve: done(resolve), reject: done(reject) });
       this.sock.write(JSON.stringify({ execute, arguments: args, id }) + "\n");
     });
   }

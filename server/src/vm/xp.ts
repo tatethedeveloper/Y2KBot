@@ -2,6 +2,9 @@
 // Every VM runs the base image in -snapshot mode, so nothing an agent does
 // is ever written back to the base disk: shut down = factory reset.
 //
+// Instant boot: XP is booted once to the desktop and saved (memory → a file, disk → an overlay on
+// the base image). Machines then start by loading that memory file instead of booting Windows.
+//
 // Two side channels besides screen/keyboard/mouse:
 //  • COM1 is wired to a TCP socket here, so xp_cmd can send a command's output straight back.
 //  • The shared folder is a virtual FAT drive, normally plugged in as a USB stick. USB can be
@@ -9,7 +12,7 @@
 //    refuses to snapshot a machine with a writable virtual FAT drive attached.
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -18,6 +21,7 @@ import net, { type AddressInfo } from "node:net";
 import { PNG } from "pngjs";
 import { QMP } from "./qmp.js";
 import { charToQcodes, comboToQcodes } from "./keys.js";
+import { safeSegment } from "../agents.js";
 
 const SHARE_ID = "y2kshare";
 const SHARE_DEV = "y2kshare-dev";
@@ -40,6 +44,16 @@ export interface XPConfig {
   sharedRoot: string;
   /** How the shared drive is attached: "usb" (default; allows checkpoints) or "ide" (an extra hard disk, the old way). */
   shareBus?: "usb" | "ide";
+  /** Where the instant-boot snapshot lives ("" = instant boot off). */
+  readyDir?: string;
+}
+
+/** Instant boot: XP saved once at the desktop, every machine starts from there. */
+export interface ReadyStatus {
+  state: "off" | "none" | "ready" | "outdated" | "preparing" | "unsupported";
+  detail: string;
+  at?: number;
+  sizeMb?: number;
 }
 
 export interface Checkpoint { tag: string; label: string; at: number }
@@ -61,6 +75,8 @@ interface VM {
   /** everything XP has written to COM1 (trimmed), plus who's waiting for it */
   serial: { sock: net.Socket | null; text: string; waiters: Set<() => void> };
   checkpoints: Checkpoint[];
+  /** last frame sent to the live viewer, to skip sending unchanged ones */
+  lastLive?: PNG;
   /** one checkpoint/undo/eject at a time */
   busy: Promise<unknown>;
 }
@@ -72,7 +88,10 @@ export interface VMSummary { id: string; owner: string; startedAt: number; width
 export class XPManager extends EventEmitter {
   private vms = new Map<string, VM>(); // keyed by owner screen name
   private counter = 0;
-  private runRoot = path.join(os.tmpdir(), "ram-vms");
+  private runRoot = path.join(os.tmpdir(), "y2kbot-vms");
+  /** boots in progress, so a second xp_boot (or the Boot button) waits for the same machine */
+  private booting = new Map<string, Promise<VMSummary & { instant: boolean }>>();
+  private madeDirs = new Set<string>();
 
   constructor(public cfg: XPConfig) {
     super();
@@ -94,8 +113,9 @@ export class XPManager extends EventEmitter {
   /** Host folder that shows up inside this buddy's XP as a drive (created on demand). */
   sharedDir(owner: string): string | null {
     if (!this.cfg.sharedRoot) return null;
-    const dir = path.join(this.cfg.sharedRoot, owner.replace(/[^\w.\- ]/g, "_"));
-    mkdirSync(dir, { recursive: true });
+    const dir = path.join(this.cfg.sharedRoot, safeSegment(owner));
+    // created once per run; boot() re-creates it in case it was deleted since
+    if (!this.madeDirs.has(dir)) { mkdirSync(dir, { recursive: true }); this.madeDirs.add(dir); }
     return dir;
   }
 
@@ -116,52 +136,77 @@ export class XPManager extends EventEmitter {
   mouseAt(owner: string) { return this.vms.get(owner)?.mouse ?? null; }
   size(owner: string) { const v = this.need(owner); return { width: v.width, height: v.height }; }
 
-  async boot(owner: string): Promise<VMSummary> {
-    const existing = this.vms.get(owner);
-    if (existing) return this.summary(existing);
-    const doc = this.doctor();
-    if (!doc.ok) throw new Error(doc.problems.join(" "));
-    if (this.vms.size >= this.cfg.maxVms) throw new Error(`VM limit reached (${this.cfg.maxVms}). Another buddy must shut theirs down first.`);
-
-    const id = `XP-${++this.counter}`;
-    const dir = path.join(this.runRoot, `${id}-${Date.now()}`);
-    mkdirSync(dir, { recursive: true });
-    const qmpPort = await freePort();
-    const serialPort = await freePort();
-
+  /** QEMU arguments every machine shares. Instant boot needs these identical between saving and restoring. */
+  private machineArgs(name: string, drive: string, qmpPort: number, serialPort: number): string[] {
     const net =
       this.cfg.network === "none" ? ["-nic", "none"]
       : this.cfg.network === "restricted" ? ["-nic", "user,model=rtl8139,restrict=on"]
       : ["-nic", "user,model=rtl8139"];
-
-    // QEMU's -drive uses commas as separators; a literal comma in a path is written ",,".
-    const q = (p: string) => p.replace(/,/g, ",,");
-    const shared = this.sharedDir(owner);
-    const bus = this.cfg.shareBus === "ide" ? "ide" : "usb";
-    const sharedArgs = !shared ? []
-      // Shared folder: a virtual FAT disk backed by a real folder. Writes land in the folder.
-      : bus === "ide" ? ["-drive", `file=fat:rw:${q(shared)},format=raw,if=ide,index=1,snapshot=off`]
-      // As a USB stick on a fixed port (same port + serial = same drive letter every time it's replugged).
-      : ["-drive", `file=fat:rw:${q(shared)},format=raw,if=none,id=${SHARE_ID}`,
-         "-device", `usb-storage,drive=${SHARE_ID},id=${SHARE_DEV},removable=on,serial=Y2KSHARE,bus=usb-bus.0,port=2`];
-    const args = [
-      "-name", `${id} (${owner})`,
+    return [
+      "-name", name,
       "-machine", `pc,acpi=${this.cfg.acpi ? "on" : "off"}`,
       "-cpu", this.cfg.cpu || "pentium3",
       "-m", String(this.cfg.memoryMb),
       "-smp", "1",
       ...this.accelChain().flatMap((a) => ["-accel", a]),
-      // Base disk: snapshot=on means writes go to a throwaway overlay, never the base image.
-      "-drive", `file=${q(this.cfg.baseImage)},format=qcow2,if=ide,index=0,snapshot=on`,
+      "-drive", drive,
       "-vga", this.cfg.vga,
       "-usb", "-device", "usb-tablet,bus=usb-bus.0,port=1", // absolute pointer: clicks land exactly where asked
-      ...sharedArgs,
       // COM1 → a socket here: xp_cmd sends command output back this way, instantly.
       "-serial", `tcp:127.0.0.1:${serialPort},server=on,wait=off`,
       "-rtc", "base=localtime",
       ...net,
       "-display", "none",
       "-qmp", `tcp:127.0.0.1:${qmpPort},server=on,wait=off`,
+    ];
+  }
+
+  boot(owner: string, opts: { cold?: boolean } = {}): Promise<VMSummary & { instant: boolean }> {
+    const existing = this.vms.get(owner);
+    if (existing) return Promise.resolve({ ...this.summary(existing), instant: false });
+    let p = this.booting.get(owner);
+    if (!p) {
+      p = this.bootOnce(owner, !!opts.cold).finally(() => this.booting.delete(owner));
+      this.booting.set(owner, p);
+    }
+    return p;
+  }
+
+  private async bootOnce(owner: string, cold: boolean): Promise<VMSummary & { instant: boolean }> {
+    const doc = this.doctor();
+    if (!doc.ok) throw new Error(doc.problems.join(" "));
+    // (this boot isn't in `booting` yet when this runs, so the count is everyone else's)
+    if (this.vms.size + this.booting.size >= this.cfg.maxVms) throw new Error(`VM limit reached (${this.cfg.maxVms}). Another buddy must shut theirs down first.`);
+    if (!cold && this.readyStatus().state === "ready") {
+      try { return { ...(await this.start(owner, true)), instant: true }; }
+      catch (e) { this.emit("log", `Instant boot failed, starting XP the slow way: ${(e as Error).message}`); }
+    }
+    return { ...(await this.start(owner, false)), instant: false };
+  }
+
+  private async start(owner: string, instant: boolean): Promise<VMSummary> {
+    const id = `XP-${++this.counter}`;
+    const dir = path.join(this.runRoot, `${id}-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    const qmpPort = await freePort();
+    const serialPort = await freePort();
+
+    const shared = this.sharedDir(owner);
+    if (shared) mkdirSync(shared, { recursive: true });
+    const bus = this.cfg.shareBus === "ide" ? "ide" : "usb";
+    // An instant boot restores a machine saved without the shared drive; it's plugged in afterwards.
+    const sharedArgs = !shared || instant ? []
+      // Shared folder: a virtual FAT disk backed by a real folder. Writes land in the folder.
+      : bus === "ide" ? ["-drive", `file=fat:rw:${q(shared)},format=raw,if=ide,index=1,snapshot=off`]
+      // As a USB stick on a fixed port (same port + serial = same drive letter every time it's replugged).
+      : ["-drive", `file=fat:rw:${q(shared)},format=raw,if=none,id=${SHARE_ID}`,
+         "-device", `usb-storage,drive=${SHARE_ID},id=${SHARE_DEV},removable=on,serial=Y2KSHARE,bus=usb-bus.0,port=2`];
+    // snapshot=on: writes go to a throwaway overlay, never the base image (or the saved desktop).
+    const disk = instant ? this.readyFiles().disk : this.cfg.baseImage;
+    const args = [
+      ...this.machineArgs(`${id} (${owner})`, `file=${q(disk)},format=qcow2,if=ide,index=0,snapshot=on`, qmpPort, serialPort),
+      ...sharedArgs,
+      ...(instant ? ["-incoming", "defer"] : []),
     ];
 
     const proc = spawn(this.cfg.qemuBin, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
@@ -173,7 +218,26 @@ export class XPManager extends EventEmitter {
       qmp = await QMP.connect(qmpPort);
     } catch (e) {
       proc.kill("SIGKILL");
+      rmSync(dir, { recursive: true, force: true });
       throw new Error(`QEMU failed to start: ${stderr.trim() || (e as Error).message}`);
+    }
+
+    if (instant) {
+      try {
+        await qmp.cmd("migrate-incoming", { uri: `file:${this.readyFiles().ram}` });
+        let status = "inmigrate";
+        for (let i = 0; i < 600 && status === "inmigrate"; i++) { // up to a minute for a big memory file
+          await sleep(100);
+          status = (await qmp.cmd("query-status"))?.status;
+          if (proc.exitCode !== null) break;
+        }
+        if (status !== "paused" && status !== "running") throw new Error(stderr.trim() || `machine is ${status}`);
+        await qmp.cmd("cont");
+      } catch (e) {
+        qmp.close(); proc.kill("SIGKILL");
+        rmSync(dir, { recursive: true, force: true });
+        throw e;
+      }
     }
 
     const vm: VM = {
@@ -187,12 +251,143 @@ export class XPManager extends EventEmitter {
     proc.on("exit", () => {
       qmp.close();
       vm.serial.sock?.destroy();
-      this.vms.delete(owner);
+      if (this.vms.get(owner) === vm) this.vms.delete(owner);
       rmSync(dir, { recursive: true, force: true });
       this.emit("stopped", { id, owner });
     });
+    if (instant && vm.share?.bus === "usb") await this.plugShare(vm).catch((e) => this.emit("log", (e as Error).message));
     this.emit("started", this.summary(vm));
     return this.summary(vm);
+  }
+
+  // ------------------------------------------------------------------ instant boot
+  private preparing: { promise: Promise<void>; step: string } | null = null;
+
+  private readyFiles() {
+    const dir = this.cfg.readyDir || "";
+    return { dir, disk: path.join(dir, "desktop.qcow2"), ram: path.join(dir, "desktop.ram"), meta: path.join(dir, "ready.json") };
+  }
+
+  /** Everything that has to match for a saved desktop to be restorable. */
+  private readyKey(): string {
+    let base = "";
+    try { const st = statSync(this.cfg.baseImage); base = `${path.resolve(this.cfg.baseImage)}|${st.size}|${Math.round(st.mtimeMs)}`; } catch {}
+    const c = this.cfg;
+    return JSON.stringify({ base, mem: c.memoryMb, cpu: c.cpu, acpi: c.acpi, vga: c.vga, net: c.network, accel: this.accelChain(), qemu: qemuVersion(c.qemuBin)?.join("."), share: !!c.sharedRoot });
+  }
+
+  readyStatus(): ReadyStatus {
+    const f = this.readyFiles();
+    if (!f.dir) return { state: "off", detail: "Instant boot is off." };
+    if (this.preparing) return { state: "preparing", detail: this.preparing.step };
+    if (this.cfg.sharedRoot && this.cfg.shareBus === "ide") return { state: "unsupported", detail: "Instant boot needs the shared drive attached as USB (or shared folders off)." };
+    let meta: { key?: string; at?: number } = {};
+    try { meta = JSON.parse(readFileSync(f.meta, "utf8")); } catch {}
+    if (!meta.key || !existsSync(f.disk) || !existsSync(f.ram)) return { state: "none", detail: "Not set up. Machines start from a cold boot." };
+    let sizeMb = 0;
+    try { sizeMb = Math.round((statSync(f.disk).size + statSync(f.ram).size) / 1048576); } catch {}
+    if (meta.key !== this.readyKey()) return { state: "outdated", detail: "Your XP settings or image changed since the desktop was saved. Prepare it again.", at: meta.at, sizeMb };
+    return { state: "ready", detail: "Machines start straight at the desktop.", at: meta.at, sizeMb };
+  }
+
+  discardReady() {
+    if (this.preparing) throw new Error("Wait for the desktop to finish saving first.");
+    const f = this.readyFiles();
+    for (const p of [f.meta, f.disk, f.ram]) rmSync(p, { force: true });
+  }
+
+  /**
+   * Boot XP once, wait for the desktop, and save the whole machine (memory to a file, disk to an overlay
+   * on top of the base image). Later boots restore that instead of going through XP's boot.
+   */
+  prepareReady(): Promise<void> {
+    if (this.preparing) return this.preparing.promise;
+    const doc = this.doctor();
+    if (!doc.ok) return Promise.reject(new Error(doc.problems.join(" ")));
+    const status = this.readyStatus();
+    if (status.state === "off" || status.state === "unsupported") return Promise.reject(new Error(status.detail));
+    const job = { step: "Starting XP…", promise: Promise.resolve() };
+    const step = (s: string) => { job.step = s; this.emit("ready", this.readyStatus()); };
+    job.promise = this.prepare(step).finally(() => { this.preparing = null; this.emit("ready", this.readyStatus()); });
+    this.preparing = job;
+    this.emit("ready", this.readyStatus());
+    return job.promise;
+  }
+
+  private async prepare(step: (s: string) => void) {
+    const f = this.readyFiles();
+    mkdirSync(f.dir, { recursive: true });
+    const v = qemuVersion(this.cfg.qemuBin);
+    if (v && (v[0] < 8 || (v[0] === 8 && v[1] < 2))) throw new Error(`Instant boot needs QEMU 8.2 or newer (you have ${v.join(".")}).`);
+    const tmpDisk = f.disk + ".tmp", tmpRam = f.ram + ".tmp";
+    rmSync(tmpDisk, { force: true }); rmSync(tmpRam, { force: true });
+    // A small overlay on top of the base image holds whatever XP writes while booting.
+    try {
+      execFileSync(qemuImg(this.cfg.qemuBin), ["create", "-f", "qcow2", "-b", path.resolve(this.cfg.baseImage), "-F", "qcow2", tmpDisk], { stdio: "pipe", windowsHide: true });
+    } catch (e: any) { throw new Error(`Couldn't run qemu-img (it comes with QEMU): ${String(e.stderr || e.message).trim()}`); }
+
+    const qmpPort = await freePort(), serialPort = await freePort();
+    const proc = spawn(this.cfg.qemuBin, this.machineArgs("Y2Kbot instant boot", `file=${q(tmpDisk)},format=qcow2,if=ide,index=0`, qmpPort, serialPort),
+      { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+    let stderr = "";
+    proc.stderr!.on("data", (d) => (stderr += d.toString()));
+    let qmp: QMP | null = null;
+    const vm = { qmp: null as any, dir: f.dir, share: null as VM["share"] } as VM;
+    try {
+      qmp = await QMP.connect(qmpPort);
+      vm.qmp = qmp;
+      const t0 = Date.now();
+      // Wait for a desktop with a taskbar that stops changing.
+      step("Waiting for the XP desktop…");
+      let last: PNG | null = null, still = 0;
+      for (;;) {
+        if (proc.exitCode !== null) throw new Error(`QEMU stopped: ${stderr.trim() || "no reason given"}`);
+        if (Date.now() - t0 > 20 * 60_000) throw new Error("XP didn't reach the desktop within 20 minutes.");
+        await sleep(2000);
+        const png = await this.grab(vm).catch(() => null);
+        if (!png) continue;
+        const quiet = last ? changedPixels(last, png) >= 0 && changedPixels(last, png) < png.width * png.height * 0.002 : false;
+        last = png;
+        still = quiet && looksLikeDesktop(png) ? still + 1 : 0;
+        step(still ? "Desktop found, letting XP finish starting up…" : `Waiting for the XP desktop… (${Math.round((Date.now() - t0) / 1000)} s)`);
+        if (still >= 8 && Date.now() - t0 > 20_000) break; // 16 s with nothing moving
+      }
+      if (this.cfg.sharedRoot && this.cfg.shareBus !== "ide") {
+        // Plug the shared stick in once so XP sets up its USB driver now, not on every boot.
+        step("Setting up the shared drive…");
+        const share = path.join(f.dir, "share-setup");
+        mkdirSync(share, { recursive: true });
+        vm.share = { dir: share, bus: "usb" };
+        await this.plugShare(vm);
+        await sleep(20_000);
+        await this.press(vm, ["esc"]).catch(() => {}); // close an AutoPlay window if one opened
+        await sleep(2000);
+        await this.unplugShare(vm);
+        await sleep(3000);
+      }
+      step("Saving the desktop…");
+      await qmp.cmd("stop");
+      await qmp.cmd("migrate", { uri: `file:${tmpRam}` });
+      for (let i = 0; ; i++) {
+        const m = await qmp.cmd("query-migrate");
+        if (m?.status === "completed") break;
+        if (m?.status === "failed" || m?.status === "cancelled") throw new Error(`Saving memory failed: ${m["error-desc"] || m.status}`);
+        if (i > 1200) throw new Error("Saving memory took too long.");
+        await sleep(100);
+      }
+      await qmp.cmd("quit").catch(() => {});
+      for (let i = 0; i < 100 && proc.exitCode === null; i++) await sleep(100);
+      // swap the new files in
+      rmSync(f.meta, { force: true });
+      for (const [from, to] of [[tmpDisk, f.disk], [tmpRam, f.ram]]) { rmSync(to, { force: true }); renameSync(from, to); }
+      writeFileSync(f.meta, JSON.stringify({ key: this.readyKey(), at: Date.now() }, null, 2));
+    } finally {
+      qmp?.close();
+      if (proc.exitCode === null) proc.kill("SIGKILL");
+      for (let i = 0; i < 30 && proc.exitCode === null; i++) await sleep(100);
+      rmSync(tmpDisk, { force: true }); rmSync(tmpRam, { force: true });
+      rmSync(path.join(f.dir, "share-setup"), { recursive: true, force: true });
+    }
   }
 
   private summary(vm: VM): VMSummary {
@@ -220,6 +415,17 @@ export class XPManager extends EventEmitter {
   async frame(owner: string): Promise<PNG> { return this.grab(this.need(owner)); }
 
   /** Screenshot for the live viewer (and anything else that just wants the screen as-is). */
+  /** For the live viewer: grab the screen and send it only if it changed since the last one sent. */
+  async liveFrame(owner: string): Promise<boolean> {
+    const vm = this.vms.get(owner);
+    if (!vm) return false;
+    const png = await this.grab(vm);
+    if (vm.lastLive && changedPixels(vm.lastLive, png) === 0) return false;
+    vm.lastLive = png;
+    this.emit("frame", { owner, id: vm.id, png: PNG.sync.write(png) });
+    return true;
+  }
+
   async screenshot(owner: string): Promise<Buffer> {
     const vm = this.need(owner);
     const buf = PNG.sync.write(await this.grab(vm));
@@ -324,10 +530,27 @@ export class XPManager extends EventEmitter {
     const skipped: string[] = [];
     for (const ch of text) {
       const codes = charToQcodes(ch);
-      if (!codes) { skipped.push(ch); continue; }
-      await this.press(vm, codes);
+      if (codes) { await this.press(vm, codes); continue; }
+      const ansi = ansiCode(ch);
+      if (ansi) { await this.altCode(vm, ansi); continue; }
+      skipped.push(ch);
     }
     return skipped;
+  }
+
+  /** Accented letters, curly quotes, dashes…: hold Alt and type 0 + the Windows-1252 code on the keypad. */
+  private async altCode(vm: VM, code: number) {
+    const ev = (down: boolean, k: string) => ({ type: "key", data: { down, key: { type: "qcode", data: k } } });
+    await vm.qmp.cmd("input-send-event", { events: [ev(true, "alt")] });
+    await sleep(30);
+    for (const d of `0${code}`) {
+      await vm.qmp.cmd("input-send-event", { events: [ev(true, `kp_${d}`)] });
+      await sleep(30);
+      await vm.qmp.cmd("input-send-event", { events: [ev(false, `kp_${d}`)] });
+      await sleep(30);
+    }
+    await vm.qmp.cmd("input-send-event", { events: [ev(false, "alt")] });
+    await sleep(40);
   }
 
   // ------------------------------------------------------------------ COM1 (xp_cmd)
@@ -353,7 +576,7 @@ export class XPManager extends EventEmitter {
    * Opens a console through Start → Run, types the command wrapped in markers, and reads COM1 until
    * the end marker arrives. The console closes itself when the command finishes.
    */
-  async cmd(owner: string, command: string, timeoutMs = 60_000): Promise<CmdResult> {
+  async cmd(owner: string, command: string, timeoutMs = 60_000, signal?: AbortSignal): Promise<CmdResult> {
     const vm = this.need(owner);
     if (!vm.serial.sock) throw new Error("XP's COM1 link isn't connected yet. Wait for the machine to finish booting and try again.");
     // letters only: a digit right before ">" would turn into a file-handle redirect in cmd
@@ -377,12 +600,15 @@ export class XPManager extends EventEmitter {
     await this.key(owner, "enter");
 
     const out = () => vm.serial.text.slice(startLen);
+    // stops waiting (not the command itself) when the buddy is stopped
     const wait = (pred: () => boolean, ms: number) => new Promise<boolean>((resolve) => {
-      if (pred()) return resolve(true);
-      const done = (v: boolean) => { clearTimeout(t); vm.serial.waiters.delete(check); resolve(v); };
+      if (pred() || signal?.aborted) return resolve(pred());
+      const done = (v: boolean) => { clearTimeout(t); vm.serial.waiters.delete(check); signal?.removeEventListener("abort", onAbort); resolve(v); };
       const check = () => { if (pred()) done(true); };
+      const onAbort = () => done(pred());
       const t = setTimeout(() => done(pred()), ms);
       vm.serial.waiters.add(check);
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
     if (!(await wait(() => out().includes(S), 20_000))) {
       if (!this.vms.has(owner)) throw new Error("The XP machine stopped.");
@@ -432,8 +658,9 @@ export class XPManager extends EventEmitter {
 
   private async plugShare(vm: VM) {
     if (!vm.share || vm.share.bus !== "usb") return;
-    const q = (p: string) => p.replace(/,/g, ",,");
-    const r = await vm.qmp.cmd("human-monitor-command", { "command-line": `drive_add 0 if=none,id=${SHARE_ID},file=fat:rw:${q(vm.share.dir)},format=raw` });
+    // Quoted: the monitor splits on spaces, and folders like "Application Support" have them.
+    const opts = `if=none,id=${SHARE_ID},file=fat:rw:${q(vm.share.dir)},format=raw`;
+    const r = await vm.qmp.cmd("human-monitor-command", { "command-line": `drive_add 0 "${opts.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` });
     if (!/^OK/.test(String(r).trim())) throw new Error(`Couldn't reattach the shared drive: ${String(r).trim()}`);
     await vm.qmp.cmd("device_add", { driver: "usb-storage", drive: SHARE_ID, id: SHARE_DEV, removable: true, serial: "Y2KSHARE", bus: "usb-bus.0", port: "2" });
   }
@@ -539,6 +766,72 @@ export class XPManager extends EventEmitter {
   shutdownAll() {
     for (const vm of this.vms.values()) vm.proc.kill("SIGKILL");
   }
+}
+
+/** Windows-1252 code for a character XP can type with Alt+0nnn (null if it has none). */
+const CP1252_EXTRA: Record<string, number> = {
+  "€": 128, "‚": 130, "ƒ": 131, "„": 132, "…": 133, "†": 134, "‡": 135, "ˆ": 136, "‰": 137, "Š": 138, "‹": 139, "Œ": 140, "Ž": 142,
+  "‘": 145, "’": 146, "“": 147, "”": 148, "•": 149, "–": 150, "—": 151, "˜": 152, "™": 153, "š": 154, "›": 155, "œ": 156, "ž": 158, "Ÿ": 159,
+};
+export function ansiCode(ch: string): number | null {
+  const c = ch.codePointAt(0)!;
+  if (c >= 0xa0 && c <= 0xff) return c;
+  return CP1252_EXTRA[ch] ?? null;
+}
+
+/** QEMU's -drive uses commas as separators; a literal comma in a path is written ",,". */
+const q = (p: string) => p.replace(/,/g, ",,");
+
+/** qemu-img lives next to qemu-system-*. */
+function qemuImg(qemuBin: string): string {
+  const dir = path.dirname(qemuBin);
+  const exe = process.platform === "win32" ? "qemu-img.exe" : "qemu-img";
+  return dir && dir !== "." ? path.join(dir, exe) : exe;
+}
+
+const versions = new Map<string, number[] | null>();
+function qemuVersion(qemuBin: string): number[] | null {
+  if (versions.has(qemuBin)) return versions.get(qemuBin)!;
+  let v: number[] | null = null;
+  try {
+    const out = execFileSync(qemuBin, ["--version"], { encoding: "utf8", windowsHide: true });
+    const m = out.match(/version (\d+)\.(\d+)\.?(\d*)/);
+    if (m) v = [Number(m[1]), Number(m[2]), Number(m[3] || 0)];
+  } catch {}
+  if (v) versions.set(qemuBin, v);
+  return v;
+}
+
+/**
+ * Is this XP's desktop? Looks for the taskbar along the bottom: one colour across most of it,
+ * blue (XP look) or grey (classic look), with a Start button at the left. The blue Welcome
+ * screen has a band too, but no green or grey Start button.
+ */
+export function looksLikeDesktop(png: PNG): boolean {
+  const { width: w, height: h, data } = png;
+  if (w < 320 || h < 200) return false;
+  const px = (x: number, y: number) => { const i = (y * w + x) * 4; return [data[i], data[i + 1], data[i + 2]]; };
+  const y = h - 8;
+  const counts = new Map<string, number>();
+  for (let x = Math.round(w * 0.3); x < Math.round(w * 0.7); x += 2) {
+    const [r, g, b] = px(x, y);
+    const k = `${r >> 4},${g >> 4},${b >> 4}`;
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  const [top, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0] ?? ["", 0];
+  if (n < (w * 0.4) / 2 * 0.5) return false; // the band isn't one colour
+  const [r, g, b] = top.split(",").map((v) => Number(v) * 16 + 8);
+  const blue = b > 150 && b > r + 60;
+  const grey = Math.abs(r - g) < 24 && Math.abs(g - b) < 24 && r > 150;
+  if (!blue && !grey) return false;
+  // Start button in the bottom-left corner
+  let green = 0, greyBtn = 0;
+  for (let x = 4; x < Math.min(90, w); x += 2) {
+    const [r2, g2, b2] = px(x, y);
+    if (g2 > r2 + 30 && g2 > b2 + 20) green++;
+    if (Math.abs(r2 - g2) < 24 && Math.abs(g2 - b2) < 24 && r2 > 150) greyBtn++;
+  }
+  return blue ? green > 6 : greyBtn > 10;
 }
 
 function freePort(): Promise<number> {

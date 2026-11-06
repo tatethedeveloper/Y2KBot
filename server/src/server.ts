@@ -15,12 +15,12 @@ import { AttachmentStore } from "./files.js";
 import { McpManager } from "./mcp.js";
 import { searchReady, type SearchConfig } from "./web.js";
 import { xpGuide } from "./knowledge.js";
-import { Bench, toMarkdown } from "./bench.js";
+import { Bench, BENCH_AGENT, toMarkdown } from "./bench.js";
 import { Ocr } from "./ocr.js";
 import { SkillStore, skillsFile } from "./skills.js";
 import { dismissAutoPlay } from "./tools.js";
 import { ChatLogger, toHtml, toText, type LogItem } from "./logs.js";
-import { exportBuddy, parseBuddyFile, freeName } from "./buddyfile.js";
+import { exportBuddy, parseBuddyFile, freeName, readGallery, readGalleryFile } from "./buddyfile.js";
 import type { ToolRisk } from "./mcp.js";
 import { ChatGPTAuth, ChatGPTProvider, type SecretBox } from "./chatgpt.js";
 
@@ -49,8 +49,8 @@ export async function startServer(opts: StartOptions = {}) {
   // Sign in with ChatGPT: tokens live next to settings, encrypted when the app gives us a keychain.
   const chatgpt = new ChatGPTAuth(path.join(dataDir, "chatgpt-signin.json"), opts.secrets);
   providers.add(new ChatGPTProvider(chatgpt));
-  const PROVIDER = providers.get(process.env.RAM_PROVIDER || "") ? process.env.RAM_PROVIDER! : "anthropic";
-  const MODEL = process.env.RAM_MODEL || PRESETS.find((p) => p.id === PROVIDER)!.exampleModel;
+  const PROVIDER = providers.get(process.env.Y2K_PROVIDER || "") ? process.env.Y2K_PROVIDER! : "anthropic";
+  const MODEL = process.env.Y2K_MODEL || PRESETS.find((p) => p.id === PROVIDER)!.exampleModel;
   const providerInfo = () => PRESETS.map((p) => ({ id: p.id, label: p.label, ready: !!providers.get(p.id)?.ready, exampleModel: p.exampleModel }));
   const memory = new MemoryStore(path.join(dataDir, "memory"));
   const files = new AttachmentStore(path.join(dataDir, "files"));
@@ -74,6 +74,7 @@ export async function startServer(opts: StartOptions = {}) {
     acpi: (process.env.XP_ACPI || "off") === "on",
     sharedRoot: process.env.XP_SHARE === "0" ? "" : path.join(dataDir, "shared"),
     shareBus: process.env.XP_SHARE_BUS === "ide" ? "ide" : "usb",
+    readyDir: process.env.XP_INSTANT_BOOT === "0" ? "" : path.join(dataDir, "xp-ready"),
   });
 
   const app = express();
@@ -157,14 +158,15 @@ export async function startServer(opts: StartOptions = {}) {
   const skills = new SkillStore(skillsFile(dataDir));
   skills.on("changed", () => broadcast({ type: "skills", skills: skills.list() }));
   // ---- "Are you sure?" approvals for risky MCP actions
-  type Answer = "yes" | "no" | "timeout" | "nobody";
+  type Answer = "yes" | "no" | "timeout" | "nobody" | "stopped";
   const approvalsFile = path.join(dataDir, "approvals.json");
   const alwaysAllowed = new Set<string>((() => { try { return JSON.parse(readFileSync(approvalsFile, "utf8")) as string[]; } catch { return []; } })());
   const pending = new Map<string, { req: ToolRisk & { who: string; args: unknown; id: string; at: number }; done: (a: Answer) => void }>();
   const allowKey = (who: string, server: string, tool: string) => `${who}|${server}|${tool}`;
-  const approve = (req: ToolRisk & { who: string; args: unknown }): Promise<Answer> => {
+  const approve = (req: ToolRisk & { who: string; args: unknown }, signal?: AbortSignal): Promise<Answer> => {
     if (alwaysAllowed.has(allowKey(req.who, req.server, req.tool))) return Promise.resolve("yes");
     if (![...wss.clients].some((c) => c.readyState === WebSocket.OPEN)) return Promise.resolve("nobody");
+    if (signal?.aborted) return Promise.resolve("stopped");
     const id = Math.random().toString(36).slice(2, 10);
     let args = "";
     try { args = JSON.stringify(req.args ?? {}, null, 2); } catch { args = String(req.args); }
@@ -172,15 +174,19 @@ export async function startServer(opts: StartOptions = {}) {
     bus.event(req.who, `*** ${req.who} wants to use ${req.title} (${req.server}). Waiting for you to say yes or no…`);
     return new Promise<Answer>((resolve) => {
       const timer = setTimeout(() => finish("timeout"), 5 * 60_000);
+      const onStop = () => finish("stopped");
       const finish = (a: Answer) => {
         if (!pending.has(id)) return;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", onStop);
         pending.delete(id);
         broadcast({ type: "approve_done", id, answer: a });
-        bus.event(req.who, a === "yes" ? `*** You allowed ${req.title}.` : a === "no" ? `*** You said no to ${req.title}.` : `*** Nobody answered, so ${req.title} wasn't run.`);
+        bus.event(req.who, a === "yes" ? `*** You allowed ${req.title}.` : a === "no" ? `*** You said no to ${req.title}.`
+          : a === "stopped" ? `*** ${req.who} was stopped, so ${req.title} wasn't run.` : `*** Nobody answered, so ${req.title} wasn't run.`);
         resolve(a);
       };
       pending.set(id, { req: full, done: finish });
+      signal?.addEventListener("abort", onStop, { once: true });
       broadcast({ type: "approve_request", ...full });
     });
   };
@@ -204,7 +210,10 @@ export async function startServer(opts: StartOptions = {}) {
   });
   /** Validate a buddy coming from the UI or an imported file, keeping only known fields. */
   function cleanAgent(a: any): Agent | null {
-    if (!a?.screenName || !/^[\w.\- ]{2,24}$/.test(String(a.screenName))) return null;
+    const sn = String(a?.screenName ?? "");
+    // needs a letter or digit: names like ".." would point outside the buddy's own folders
+    if (!/^[\w.\- ]{2,24}$/.test(sn) || !/\w/.test(sn)) return null;
+    if (sn.toLowerCase() === BENCH_AGENT) return null; // reserved: the benchmark wipes this buddy's shared folder
     const str = (v: unknown, max: number) => (typeof v === "string" ? v.slice(0, max) : "");
     return {
       screenName: String(a.screenName),
@@ -226,6 +235,28 @@ export async function startServer(opts: StartOptions = {}) {
     };
   }
 
+  const galleryDir = path.join(projectRoot, "buddies");
+  /** Add a buddy from a .y2kbuddy file's text. Notes say what the user may need to set up. */
+  function importBuddy(text: string) {
+    const { buddy, memory: notes } = parseBuddyFile(text);
+    const wanted = String(buddy.screenName || "").trim();
+    const name = freeName(wanted, (n) => !!store.get(n) || n.toLowerCase() === BENCH_AGENT);
+    const a = cleanAgent({ ...buddy, screenName: name });
+    if (!a) throw new Error("The buddy in that file has an invalid screen name.");
+    const notesOut: string[] = [];
+    if (name !== wanted) notesOut.push(store.get(wanted) ? `You already have a ${wanted}, so this one is called ${name}.` : `"${wanted}" can't be used as a screen name, so this one is called ${name}.`);
+    if (buddy.provider && !a.provider) notesOut.push(`It used the "${buddy.provider}" provider, which this app doesn't have, so it'll use your default.`);
+    else if (a.provider && !providers.get(a.provider)?.ready) notesOut.push(`It uses ${providers.get(a.provider)!.label}, which isn't set up here yet (Prefs).`);
+    const known = new Set(mcp.status().map((x) => x.name));
+    const missing = Array.isArray(a.mcp) ? a.mcp.filter((n) => !known.has(n)) : [];
+    if (missing.length) notesOut.push(`It expects MCP server${missing.length > 1 ? "s" : ""} you haven't set up: ${missing.join(", ")}.`);
+    if (a.capabilities.xp && !vms.doctor().ok) notesOut.push("It uses Windows XP, which isn't set up yet (Prefs → Windows XP machines).");
+    store.upsert(a);
+    if (notes && a.capabilities.memory !== false) memory.set(a.screenName, notes);
+    broadcast(buddyList());
+    return { screenName: a.screenName, notes: notesOut, withMemory: !!notes };
+  }
+
   function routeLabel(a: Agent) {
     try { const r = runner.route(a); return { provider: r.provider.id, label: r.provider.label, model: r.model, ready: r.provider.ready }; }
     catch (e) { return { provider: a.provider ?? "?", label: a.provider ?? "?", model: a.model ?? "", ready: false }; }
@@ -233,13 +264,29 @@ export async function startServer(opts: StartOptions = {}) {
 
   vms.on("started", (vm) => { broadcast({ type: "vm_started", vm }); broadcast(buddyList()); });
   vms.on("stopped", (vm) => { broadcast({ type: "vm_stopped", vm }); broadcast(buddyList()); });
-  vms.on("frame", ({ owner, id, png }) => broadcast({ type: "vm_frame", owner, id, png: (png as Buffer).toString("base64") }));
+  vms.on("ready", (status) => broadcast({ type: "xp_ready", status }));
+  vms.on("log", (line) => console.log(`[xp] ${line}`));
+  // XP frames go only to the viewer windows watching that machine (several a second; other windows don't need them).
+  const watchers = new Map<WebSocket, Set<string>>();
+  const lastFrame = new Map<string, string>(); // owner → latest frame, for a viewer that opens mid-way
+  const watched = (owner: string) => [...watchers.values()].some((s) => s.has(owner));
+  vms.on("frame", ({ owner, id, png }) => {
+    const msg = JSON.stringify({ type: "vm_frame", owner, id, png: (png as Buffer).toString("base64") });
+    lastFrame.set(owner, msg);
+    for (const [ws, set] of watchers) if (set.has(owner) && ws.readyState === WebSocket.OPEN) ws.send(msg);
+  });
+  vms.on("stopped", ({ owner }) => lastFrame.delete(owner));
 
-  // Keep viewers live even while an agent is "thinking".
+  // Keep viewers live (about 4 frames a second, only when the picture changes), even while an agent is "thinking".
+  let ticking = false; // a slow screendump shouldn't let ticks pile up
   const ticker = setInterval(async () => {
-    if (wss.clients.size === 0) return;
-    for (const vm of vms.list()) await vms.screenshot(vm.owner).catch(() => {});
-  }, 2000);
+    if (ticking) return;
+    const owners = vms.list().map((v) => v.owner).filter(watched);
+    if (!owners.length) return;
+    ticking = true;
+    try { for (const o of owners) await vms.liveFrame(o).catch(() => {}); }
+    finally { ticking = false; }
+  }, 250);
 
   wss.on("connection", (ws) => {
     ws.send(JSON.stringify({ type: "hello", web: webInfo(), provider: PROVIDER, model: MODEL, providers: providerInfo(), demoMode: runner.demoMode, xp: vms.doctor() }));
@@ -250,8 +297,14 @@ export async function startServer(opts: StartOptions = {}) {
     ws.send(JSON.stringify(buddyList()));
     for (const p of pending.values()) ws.send(JSON.stringify({ type: "approve_request", ...p.req })); // after buddies, so the dialog has icons
     const reply = (m: object) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(m));
+    ws.on("close", () => watchers.delete(ws));
 
-    ws.on("message", async (raw) => {
+    // One bad message (a missing field, a failed write) must not become an unhandled rejection.
+    ws.on("message", (raw) => void onMessage(raw).catch((e) => {
+      console.error("ws message:", e);
+      reply({ type: "error", text: (e as Error).message });
+    }));
+    const onMessage = async (raw: import("ws").RawData) => {
       let m: any;
       try { m = JSON.parse(raw.toString()); } catch { return; }
       switch (m.type) {
@@ -384,13 +437,50 @@ export async function startServer(opts: StartOptions = {}) {
           bus.event(a.screenName, `sent ${name} (${Math.ceil(data.length / 1024)} KB) to ${a.screenName}'s shared folder`);
           break;
         }
-        case "remove_agent": rooms.removeBuddyEverywhere(m.who); runner.reset(m.who); await vms.shutdown(m.who); store.remove(m.who); broadcast(buddyList()); break;
+        case "remove_agent": {
+          const a = store.get(String(m.who ?? ""));
+          if (!a) break;
+          const who = a.screenName;
+          rooms.removeBuddyEverywhere(who); runner.reset(who); await vms.shutdown(who); store.remove(who);
+          // a new buddy that reuses this name shouldn't inherit "don't ask again"
+          const before = alwaysAllowed.size;
+          for (const k of alwaysAllowed) if (k.startsWith(`${who}|`)) alwaysAllowed.delete(k);
+          if (alwaysAllowed.size !== before) writeFileSync(approvalsFile, JSON.stringify([...alwaysAllowed], null, 2));
+          broadcast(buddyList());
+          break;
+        }
         case "vm_shutdown": await vms.shutdown(m.owner); break;
         case "vm_boot": {
           const a = store.get(m.owner);
           if (!a?.capabilities.xp) return;
           try { await vms.boot(a.screenName); }
           catch (e) { bus.event(a.screenName, `*** couldn't boot XP: ${(e as Error).message}`); }
+          break;
+        }
+        case "vm_watch": { // a viewer window opened (on) or closed (off)
+          const owner = String(m.owner ?? "");
+          let set = watchers.get(ws);
+          if (!set) watchers.set(ws, (set = new Set()));
+          if (m.on === false) set.delete(owner);
+          else { set.add(owner); const f = lastFrame.get(owner); if (f && ws.readyState === WebSocket.OPEN) ws.send(f); }
+          break;
+        }
+        case "xp_ready_get": reply({ type: "xp_ready", status: vms.readyStatus() }); break;
+        case "xp_ready_prepare":
+          vms.prepareReady().catch((e) => broadcast({ type: "xp_ready", status: vms.readyStatus(), error: (e as Error).message }));
+          break;
+        case "xp_ready_discard":
+          try { vms.discardReady(); broadcast({ type: "xp_ready", status: vms.readyStatus() }); }
+          catch (e) { reply({ type: "xp_ready", status: vms.readyStatus(), error: (e as Error).message }); }
+          break;
+        case "vm_paste": { // the human's clipboard, typed into XP
+          const owner = String(m.owner), text = String(m.text ?? "").replace(/\r\n?/g, "\n").slice(0, 4000);
+          if (!vms.has(owner) || !text) break;
+          try {
+            const skipped = await vms.type(owner, text);
+            vms.screenshot(owner).catch(() => {});
+            reply({ type: "vm_pasted", owner, chars: text.length, skipped: [...new Set(skipped)].join("") });
+          } catch (e) { reply({ type: "vm_pasted", owner, error: (e as Error).message }); }
           break;
         }
         case "vm_click": // the human can grab the mouse too
@@ -421,27 +511,14 @@ export async function startServer(opts: StartOptions = {}) {
           reply({ type: "buddy_file", reqId: m.reqId, name: `${a.screenName}.y2kbuddy`, text: exportBuddy(a, m.withMemory ? memory.get(a.screenName) : undefined) });
           break;
         }
-        case "buddy_import": {
+        case "buddy_import":
+        case "gallery_add":
           try {
-            const { buddy, memory: notes } = parseBuddyFile(String(m.text || ""));
-            const wanted = String(buddy.screenName || "").trim();
-            const name = freeName(wanted, (n) => !!store.get(n));
-            const a = cleanAgent({ ...buddy, screenName: name });
-            if (!a) throw new Error("The buddy in that file has an invalid screen name.");
-            const notesOut: string[] = [];
-            if (name !== wanted) notesOut.push(`You already have a ${wanted}, so this one is called ${name}.`);
-            if (buddy.provider && !a.provider) notesOut.push(`It used the "${buddy.provider}" provider, which this app doesn't have, so it'll use your default.`);
-            else if (a.provider && !providers.get(a.provider)?.ready) notesOut.push(`It uses ${providers.get(a.provider)!.label}, which isn't set up here yet (Prefs).`);
-            const known = new Set(mcp.status().map((x) => x.name));
-            const missing = Array.isArray(a.mcp) ? a.mcp.filter((n) => !known.has(n)) : [];
-            if (missing.length) notesOut.push(`It expects MCP server${missing.length > 1 ? "s" : ""} you haven't set up: ${missing.join(", ")}.`);
-            store.upsert(a);
-            if (notes && a.capabilities.memory !== false) memory.set(a.screenName, notes);
-            broadcast(buddyList());
-            reply({ type: "buddy_imported", reqId: m.reqId, screenName: a.screenName, notes: notesOut, withMemory: !!notes });
+            const text = m.type === "gallery_add" ? readGalleryFile(galleryDir, String(m.file || "")) : String(m.text || "");
+            reply({ type: "buddy_imported", reqId: m.reqId, ...importBuddy(text) });
           } catch (e) { reply({ type: "buddy_imported", reqId: m.reqId, error: (e as Error).message }); }
           break;
-        }
+        case "gallery_get": reply({ type: "gallery", reqId: m.reqId, buddies: readGallery(galleryDir) }); break;
         case "skills_get": reply({ type: "skills", skills: skills.list() }); break;
         case "skill_put":
           try { skills.put({ id: m.id, title: String(m.title ?? ""), when: String(m.when ?? ""), steps: String(m.steps ?? ""), by: "You" }); }
@@ -472,7 +549,7 @@ export async function startServer(opts: StartOptions = {}) {
           if (vms.has(m.owner)) { await vms.key(m.owner, m.combo).catch(() => {}); vms.screenshot(m.owner).catch(() => {}); }
           break;
       }
-    });
+    };
   });
 
   const host = opts.host ?? "127.0.0.1";

@@ -1,32 +1,81 @@
 // Web tools: fetch a page as readable text, and search via a provider you configure.
-import { lookup } from "node:dns/promises";
+import dns from "node:dns";
+import http from "node:http";
+import https from "node:https";
 import net from "node:net";
+import { Readable } from "node:stream";
 
 const UA = "Mozilla/5.0 (compatible; Y2Kbot/0.1; +https://github.com/)";
 const MAX_BYTES = 3 * 1024 * 1024;
 export const PAGE_CHARS = 12000;
 
 // ---------------------------------------------------------------- safety
+// Addresses on your own machine or network (and the special ranges that can reach them).
+// BlockList also matches IPv4-mapped IPv6 (::ffff:7f00:1 is 127.0.0.1) against the IPv4 rules.
+const PRIVATE = new net.BlockList();
+for (const [a, bits] of [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12],
+  ["192.0.0.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["224.0.0.0", 3],
+] as const) PRIVATE.addSubnet(a, bits, "ipv4");
+for (const [a, bits] of [
+  ["::", 96],          // unspecified, loopback and IPv4-compatible (::7f00:1)
+  ["64:ff9b::", 96], ["64:ff9b:1::", 48], // NAT64: a v4 address in disguise
+  ["100::", 64], ["2002::", 16], // discard, 6to4 (also wraps v4 addresses)
+  ["fc00::", 7], ["fe80::", 10], ["fec0::", 10], ["ff00::", 8],
+] as const) PRIVATE.addSubnet(a, bits, "ipv6");
+
 /** Is this an address on your own machine or network? Agents shouldn't poke those via web_fetch
  *  (a web page could talk a buddy into hitting your router admin page or a local service). */
 export function isPrivateIp(ip: string): boolean {
-  if (net.isIPv4(ip)) {
-    const [a, b] = ip.split(".").map(Number);
-    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
-  }
-  const v = ip.toLowerCase();
-  if (v.startsWith("::ffff:")) return isPrivateIp(v.slice(7));
-  return v === "::1" || v === "::" || v.startsWith("fc") || v.startsWith("fd") || v.startsWith("fe80");
+  const type = net.isIP(ip);
+  return type === 0 || PRIVATE.check(ip, type === 4 ? "ipv4" : "ipv6");
 }
 
-async function assertPublic(url: URL, allowPrivate: boolean) {
+const blocked = (host: string) => new Error(`${host} points at a private/local address, which buddies aren't allowed to fetch (see Prefs).`);
+
+function assertPublic(url: URL, allowPrivate: boolean) {
   if (!/^https?:$/.test(url.protocol)) throw new Error("Only http and https URLs can be fetched.");
   if (allowPrivate) return;
   const host = url.hostname.replace(/^\[|\]$/g, "");
-  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) throw new Error(`${host} is on your local network, which buddies aren't allowed to fetch (see Prefs).`);
-  const addrs = net.isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
-  if (addrs.some((a) => isPrivateIp(a.address))) throw new Error(`${host} points at a private/local address, which buddies aren't allowed to fetch (see Prefs).`);
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) throw new Error(`${host} is on your local network, which buddies aren't allowed to fetch (see Prefs).`);
+  if (net.isIP(host) && isPrivateIp(host)) throw blocked(host);
+  // names are checked as they're resolved, in publicLookup
+}
+
+/**
+ * DNS lookup for the actual connection that refuses private addresses. Checking here (not in a
+ * separate lookup beforehand) means a name can't resolve to a public address for the check and
+ * a private one for the connection (DNS rebinding).
+ */
+const publicLookup = ((host: string, opts: dns.LookupOptions, cb: (...a: any[]) => void) => {
+  dns.lookup(host, { ...opts, all: true }, (err, addrs) => {
+    if (err) return cb(err);
+    const list = addrs as unknown as dns.LookupAddress[];
+    if (!list.length) return cb(new Error(`${host} has no addresses`));
+    if (list.some((a) => isPrivateIp(a.address))) return cb(blocked(host));
+    opts.all ? cb(null, list) : cb(null, list[0].address, list[0].family);
+  });
+}) as unknown as net.LookupFunction;
+
+/** One GET, no redirects followed, through publicLookup unless private addresses are allowed. */
+function get(url: URL, allowPrivate: boolean, signal: AbortSignal): Promise<Response> {
+  const mod = url.protocol === "https:" ? https : http;
+  return new Promise((resolve, reject) => {
+    const req = mod.request(url, {
+      headers: { "user-agent": UA, accept: "text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.5" },
+      signal,
+      ...(allowPrivate ? {} : { lookup: publicLookup }),
+    }, (res) => {
+      const headers = new Headers();
+      for (const [k, v] of Object.entries(res.headers)) for (const x of [v ?? []].flat()) headers.append(k, x);
+      const status = res.statusCode ?? 502;
+      const noBody = status === 204 || status === 205 || status === 304;
+      if (noBody) res.resume();
+      resolve(new Response(noBody ? null : (Readable.toWeb(res) as ReadableStream), { status, statusText: res.statusMessage, headers }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 // ---------------------------------------------------------------- fetch
@@ -37,14 +86,10 @@ export async function webFetch(rawUrl: string, opts: { offset?: number; allowPri
   // follow redirects ourselves so every hop gets the private-address check
   let res: Response | null = null;
   for (let hop = 0; hop < 6; hop++) {
-    await assertPublic(url, !!opts.allowPrivate);
-    res = await fetch(url, {
-      redirect: "manual",
-      headers: { "user-agent": UA, accept: "text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.5" },
-      signal: opts.signal ?? AbortSignal.timeout(20000),
-    });
+    assertPublic(url, !!opts.allowPrivate);
+    res = await get(url, !!opts.allowPrivate, opts.signal ?? AbortSignal.timeout(20000));
     const loc = res.headers.get("location");
-    if (res.status >= 300 && res.status < 400 && loc) { url = new URL(loc, url); continue; }
+    if (res.status >= 300 && res.status < 400 && loc) { await res.body?.cancel().catch(() => {}); url = new URL(loc, url); continue; }
     break;
   }
   if (!res) throw new Error("No response");

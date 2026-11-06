@@ -12,6 +12,8 @@ chatgpt-signin.json
 approvals.json
 skills.json
 logs/
+xp-ready/
+*.ram
 
 # scratch / test leftovers
 .scratch/

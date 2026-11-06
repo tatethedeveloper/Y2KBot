@@ -1,5 +1,14 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
+/**
+ * A buddy or room name as one file/folder name. Never ".." or anything that collapses to it
+ * (Windows drops trailing dots and spaces), so it can't climb out of the folder it's joined to.
+ */
+export function safeSegment(name: string): string {
+  const s = name.replace(/[^\w.\- ]/g, "_");
+  return /\w/.test(s) ? s : `_${s}`;
+}
+
 export interface Agent {
   screenName: string;
   group: string;

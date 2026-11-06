@@ -1,9 +1,9 @@
 {
   "name": "y2kbot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Y2Kbot: an agent harness that looks like a turn-of-the-millennium instant messenger. Every buddy is an AI agent; some can boot Windows XP VMs.",
-  "author": "Tate",
+  "author": "Y2Kbot contributors",
   "license": "MIT",
   "keywords": [
     "ai",
@@ -29,12 +29,14 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:linux": "npm run build && electron-builder --linux",
     "typecheck": "tsc --noEmit",
-    "bench": "tsx server/src/bench-cli.ts"
+    "bench": "tsx server/src/bench-cli.ts",
+    "release": "npm run build && electron-builder --publish always"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.60.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@tesseract.js-data/eng": "^1.0.0",
+    "electron-updater": "^6.8.11",
     "express": "^4.21.2",
     "mammoth": "^1.13.0",
     "pngjs": "^7.0.0",
@@ -53,13 +55,14 @@
     "typescript": "^5.7.2"
   },
   "build": {
-    "appId": "dev.tate.y2kbot",
+    "appId": "io.y2kbot.app",
     "productName": "Y2Kbot",
     "files": [
       "dist/**",
       "electron/**",
       "web/**",
       "assets/**",
+      "buddies/**",
       "server/agents.json",
       "server/knowledge/**",
       "server/bench/**",
@@ -95,6 +98,14 @@
       "node_modules/tesseract.js/**",
       "node_modules/tesseract.js-core/**",
       "node_modules/@tesseract.js-data/**"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "tatethedeveloper",
+        "repo": "Y2KBot",
+        "releaseType": "draft"
+      }
     ]
   }
 }

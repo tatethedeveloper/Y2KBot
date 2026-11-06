@@ -150,6 +150,7 @@ export class Runner {
           "- In Save As / Open dialogs, don't browse: select all in \"File name:\" and type the full path (e.g. C:\\work\\report.txt), then press enter.",
           "- Check the screenshot after each step and confirm the result (e.g. open the folder or run \"cmd /c dir C:\\ & pause\"). Don't claim success you haven't seen.",
           "- To click anything with words on it (buttons, menus, menu items, tabs, icon labels), use xp_click_text(\"Save\"). It finds the label on screen for you, which is far more reliable than guessing coordinates. Use xp_read_screen to see all the text on screen (great for reading dialogs and error messages). Keep xp_click for things without a label.",
+          "- Work in batches: when you already know the next few actions (open a menu and pick an item, fill in a dialog and press OK, type and save), do them all in ONE xp_do call. Each round trip to you is the slow part, so one xp_do with 4 steps is much faster than 4 separate tool calls. Use single actions only when you need to see the result before deciding what comes next.",
           "- Clicks: aim for the middle of buttons and icons. Double-click opens desktop icons and files. A red crosshair in screenshots marks where your mouse pointer is.",
           coordModeFor(agent, this.safeModel(agent)) === "norm1000"
             ? "- Screen positions use a 0–1000 scale in both directions: (0,0) top-left, (500,500) the centre, (1000,1000) bottom-right. Never use raw pixel numbers."
@@ -219,6 +220,10 @@ export class Runner {
       this.bus.im(window, name, t, o.from === "user" || o.room ? undefined : { relayTo: o.from });
     };
     const replies: string[] = [];
+    const finalReply = () => replies.filter((r) => !isPass(r)).join("\n\n");
+    // Stop should end the turn now, even mid-tool (xp_wait, a long xp_cmd, an approval dialog...)
+    const stopped = new Promise<never>((_, reject) => ac.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+    stopped.catch(() => {});
 
     try {
       history.push({ role: "user", content: o.from === "user" || o.room ? text : `[IM from ${o.from}]: ${asText(text)}` });
@@ -259,20 +264,20 @@ export class Runner {
           const t = b.text.trim().replace(new RegExp(`^\\[?${escapeRe(name)}\\]?:\\s*`, "i"), "");
           if (t) { replies.push(t); say(t); }
         }
-        if (resp.stop !== "tool_use") break;
+        if (resp.stop !== "tool_use") return finalReply();
 
         const results: Anthropic.ToolResultBlockParam[] = [];
         for (const b of resp.content) {
           if (b.type !== "tool_use") continue;
           this.bus.typing(window, name, false);
-          const out = await runTool(b.name, b.input, {
-            agent, vms: this.vms, store: this.store, memory: this.memory, depth: o.depth,
+          const out = await Promise.race([stopped, runTool(b.name, b.input, {
+            agent, vms: this.vms, store: this.store, memory: this.memory, depth: o.depth, signal: ac.signal,
             files: this.extras.files, mcp: this.extras.mcp, web, window: o.window, coordMode, guide: this.extras.guide, ocr: this.extras.ocr, skills: this.extras.skills, approve: this.extras.approve,
             imBuddy: async (other, msg) => {
               this.bus.im(window, name, msg, { relayTo: other });
               return this.send(other, msg, name, o.depth + 1);
             },
-          });
+          })]);
           this.bus.event(window, `${name} ${out.status}`);
           this.bus.typing(window, name, true);
           results.push({ type: "tool_result", tool_use_id: b.id, content: out.content, is_error: out.isError });
@@ -281,17 +286,19 @@ export class Runner {
         history.push({ role: "user", content: results });
         if (ac.signal.aborted) throw new Error("aborted");
       }
-      return replies.filter((r) => !isPass(r)).join("\n\n");
+      this.bus.event(window, `*** ${name} stopped after ${MAX_STEPS} steps without finishing. Tell it to carry on if it was getting somewhere.`);
+      return finalReply() || (o.room ? "" : `(stopped after ${MAX_STEPS} steps)`);
     } catch (e) {
       // Leave the conversation in a valid state (no dangling tool_use blocks).
       history.splice(rollback);
       const msg = (e as Error).message;
-      if (ac.signal.aborted || /abort/i.test(msg)) this.bus.event(window, `${name} was stopped.`);
+      // only a real Stop counts as stopped; a provider's own timeout ("aborted due to timeout") is an error
+      if (ac.signal.aborted) this.bus.event(window, `${name} was stopped.`);
       else {
         this.bus.event(window, `*** ${name} hit an error: ${msg}`);
         this.bus.presence(name, msg); // its brain is failing: shows as Away until it works again
       }
-      return replies.filter((r) => !isPass(r)).join("\n\n") || (o.room ? "" : `(error: ${msg})`);
+      return finalReply() || (o.room ? "" : `(error: ${msg})`);
     } finally {
       this.aborts.delete(name);
       this.bus.typing(window, name, false);

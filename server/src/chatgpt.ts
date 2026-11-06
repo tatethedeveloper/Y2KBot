@@ -17,7 +17,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
-import type { Block, CompleteArgs, CompleteResult, ModelInfo, Msg, Provider } from "./providers.js";
+import { MODEL_TIMEOUT_MS, type Block, type CompleteArgs, type CompleteResult, type ModelInfo, type Msg, type Provider } from "./providers.js";
 
 const ISSUER = "https://auth.openai.com";
 const AUTHORIZE_URL = `${ISSUER}/api/accounts/authorize`;
@@ -457,7 +457,7 @@ export class ChatGPTProvider implements Provider {
       body.tool_choice = "auto";
     }
     // (temperature, max_output_tokens, previous_response_id etc. aren't allowed on plan usage)
-    return this.stream(body, a.signal);
+    return this.stream(body, AbortSignal.any([a.signal, AbortSignal.timeout(MODEL_TIMEOUT_MS)]));
   }
 
   // -------------------------------------------------- HTTP

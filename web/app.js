@@ -1,11 +1,11 @@
 // Y2Kbot — client. Runs inside the desktop app only: each page is ONE native window,
-// chosen by ?view=…&arg=…, and window.ramNative (electron/preload.cjs) is its bridge to the app.
+// chosen by ?view=…&arg=…, and window.y2kNative (electron/preload.cjs) is its bridge to the app.
 (() => {
   const $ = (sel, root = document) => root.querySelector(sel);
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const timeStr = (t = Date.now()) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
 
-  if (!window.ramNative) {
+  if (!window.y2kNative) {
     // Opened in an ordinary browser: there's no web version, so say so instead of half-working.
     document.body.innerHTML = `<div class="not-app"><img src="logo.svg" alt=""><p><b>Y2Kbot is a desktop app.</b></p><p>Open it from the Y2Kbot app (<code>npm run app</code>), not a web browser.</p></div>`;
     return;
@@ -13,14 +13,14 @@
   const params = new URLSearchParams(location.search);
   const VIEW = params.get("view") || "signon";
   const ARG = params.get("arg") || "";
-  document.body.classList.add("native", `view-${VIEW}`, `os-${window.ramNative.platform}`);
+  document.body.classList.add("native", `view-${VIEW}`, `os-${window.y2kNative.platform}`);
 
   /** Is (view,arg) the window this page *is*? Anything else opens in its own native window. */
   const isMine = (view, arg = "") => VIEW === view && ARG === arg;
-  const remote = (view, arg = "", focus = true) => window.ramNative.open({ view, arg, focus });
+  const remote = (view, arg = "", focus = true) => window.y2kNative.open({ view, arg, focus });
 
   const state = {
-    me: localStorage.getItem("ram.sn") || "",
+    me: localStorage.getItem("y2k.sn") || "",
     ws: null,
     buddies: [],
     known: null,
@@ -40,7 +40,7 @@
     frames: new Map(),
     seen: new Set(),     // message seq numbers already drawn
     sent: new Set(),     // clientIds of messages this page sent (drawn optimistically)
-    collapsed: new Set(JSON.parse(localStorage.getItem("ram.collapsed") || "[]")),
+    collapsed: new Set(JSON.parse(localStorage.getItem("y2k.collapsed") || "[]")),
   };
 
   // ================= window =================
@@ -58,10 +58,10 @@
     const api = {
       id, el, body: $(".window-body", el),
       setTitle(t) { $(".title", el).textContent = t; document.title = t; },
-      focus() {}, minimize() { window.ramNative.minimize(); },
+      focus() {}, minimize() { window.y2kNative.minimize(); },
       isFocused() { return document.hasFocus(); },
-      flash() { if (!document.hasFocus()) window.ramNative.flash(); },
-      close() { onClose?.(); window.ramNative.close(); },
+      flash() { if (!document.hasFocus()) window.y2kNative.flash(); },
+      close() { onClose?.(); window.y2kNative.close(); },
     };
     windows.set(id, api);
     const sync = () => el.classList.toggle("inactive", !document.hasFocus());
@@ -80,7 +80,7 @@
       win.el.classList.add("measuring");
       const h = win.el.offsetHeight;
       win.el.classList.remove("measuring");
-      window.ramNative.fit(h);
+      window.y2kNative.fit(h);
     });
   }
 
@@ -105,18 +105,18 @@
       </div>`;
     const sn = $(".sn", win.body);
     sn.value = state.me;
-    $(".snd", win.body).checked = localStorage.getItem("ram.muted") !== "1";
+    $(".snd", win.body).checked = localStorage.getItem("y2k.muted") !== "1";
     $(".getsn", win.body).onclick = () => { sn.value = ["xX_", "sk8r", "l33t", "ninja"][Math.floor(Math.random() * 4)] + Math.floor(Math.random() * 900 + 100); };
     $(".help", win.body).onclick = () => openPrefs();
     const go = () => {
       state.me = sn.value.trim() || "Me";
-      localStorage.setItem("ram.sn", state.me);
-      localStorage.setItem("ram.muted", $(".snd", win.body).checked ? "0" : "1");
+      localStorage.setItem("y2k.sn", state.me);
+      localStorage.setItem("y2k.muted", $(".snd", win.body).checked ? "0" : "1");
       const status = $(".status", win.body);
       $(".go", win.body).disabled = true;
       const steps = ["1. Connecting...", "2. Verifying screen name...", "3. Starting agents..."];
       steps.forEach((s, i) => setTimeout(() => (status.textContent = s), i * 380));
-      setTimeout(() => connect(() => window.ramNative.signedOn()), steps.length * 380);
+      setTimeout(() => connect(() => window.y2kNative.signedOn()), steps.length * 380);
     };
     $(".go", win.body).onclick = go;
     sn.addEventListener("keydown", (e) => e.key === "Enter" && go());
@@ -245,7 +245,7 @@
       const stamp = new Date().toISOString().slice(0, 10);
       const name = `${win.replace(/^#/, "room ")} ${stamp}.${format === "html" ? "html" : "txt"}`;
       const filters = format === "html" ? [{ name: "Web page", extensions: ["html"] }] : [{ name: "Text file", extensions: ["txt"] }];
-      const saved = await window.ramNative.saveText({ defaultName: name, filters, text: r.text });
+      const saved = await window.y2kNative.saveText({ defaultName: name, filters, text: r.text });
       const im = state.ims.get(win);
       if (saved && im) addEvent(im, `Conversation saved to ${saved}`);
     } catch (e) { xpAlert("Save Conversation", esc(e.message), { icon: "warn" }); }
@@ -254,22 +254,68 @@
   async function exportBuddy(name, withMemory = false) {
     try {
       const r = await request({ type: "buddy_export", who: name, withMemory });
-      const saved = await window.ramNative.saveText({ defaultName: r.name, filters: [{ name: "Y2Kbot buddy", extensions: ["y2kbuddy"] }], text: r.text });
+      const saved = await window.y2kNative.saveText({ defaultName: r.name, filters: [{ name: "Y2Kbot buddy", extensions: ["y2kbuddy"] }], text: r.text });
       if (saved) xpAlert("Export Buddy", `Saved <b>${esc(name)}</b>${withMemory ? " with its memory notes" : ""} to<br><code>${esc(saved)}</code><br><br>Anyone with Y2Kbot can import it. It contains no API keys.`);
     } catch (e) { xpAlert("Export Buddy", esc(e.message), { icon: "warn" }); }
   }
 
   async function importBuddy() {
     try {
-      const f = await window.ramNative.openText({ title: "Import a buddy", filters: [{ name: "Y2Kbot buddy", extensions: ["y2kbuddy", "json"] }] });
-      if (!f) return;
+      const f = await window.y2kNative.openText({ title: "Import a buddy", filters: [{ name: "Y2Kbot buddy", extensions: ["y2kbuddy", "json"] }] });
+      if (!f) return false;
       const r = await request({ type: "buddy_import", text: f.text });
-      if (r.error) return xpAlert("Import Buddy", esc(r.error), { icon: "warn" });
-      state.selected = r.screenName; localStorage.setItem("ram.selected", r.screenName);
-      xpAlert("Import Buddy", `<b>${esc(r.screenName)}</b> is on your agent list${r.withMemory ? ", with its memory notes" : ""}.` +
-        (r.notes.length ? `<ul>${r.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""), { icon: "add" });
+      if (r.error) { await xpAlert("Import Buddy", esc(r.error), { icon: "warn" }); return false; }
+      state.selected = r.screenName; localStorage.setItem("y2k.selected", r.screenName);
       Sounds.signOn();
-    } catch (e) { xpAlert("Import Buddy", esc(e.message), { icon: "warn" }); }
+      await xpAlert("Import Buddy", `<b>${esc(r.screenName)}</b> is on your agent list${r.withMemory ? ", with its memory notes" : ""}.` +
+        (r.notes.length ? `<ul>${r.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""), { icon: "add" });
+      return true;
+    } catch (e) { await xpAlert("Import Buddy", esc(e.message), { icon: "warn" }); return false; }
+  }
+
+  // ================= buddy gallery (ready-made buddies in the repo's buddies/ folder) =================
+  async function openGallery() {
+    if (!isMine("gallery")) return remote("gallery");
+    const win = createWindow({ id: "gallery", title: "Buddy Gallery", cls: "dialog gallerywin" });
+    win.body.innerHTML = `
+      <div class="content">
+        <div style="font-size:11px">Ready-made buddies. Add the ones you like; they use your default model until you pick another in Buddy Setup.</div>
+        <div class="g-list inset"><i style="color:#777">Loading…</i></div>
+      </div>
+      <div class="buttons"><button class="xp g-imp" style="margin-right:auto" title="Add a buddy from a .y2kbuddy file">Import File…</button><button class="xp g-close"><b>Close</b></button></div>`;
+    $(".g-close", win.body).onclick = () => win.close();
+    $(".g-imp", win.body).onclick = () => importBuddy();
+    let list = [];
+    try { list = (await request({ type: "gallery_get" })).buddies || []; }
+    catch (e) { $(".g-list", win.body).innerHTML = `<i style="color:#b00">${esc(e.message)}</i>`; return; }
+    const render = () => {
+      const box = $(".g-list", win.body);
+      if (!list.length) { box.innerHTML = `<i style="color:#777">The gallery is empty.</i>`; return; }
+      const cats = [...new Set(list.map((g) => g.category))];
+      box.innerHTML = cats.map((c) => `<div class="g-cat">${esc(c)}</div>` + list.filter((g) => g.category === c).map((g) => {
+        const have = !!getBuddy(g.screenName);
+        return `<div class="g-item" data-file="${esc(g.file)}">
+          <img src="${avatarUrl({ screenName: g.screenName, icon: g.icon })}" alt="" width="32" height="32">
+          <div class="g-text"><b style="color:${esc(g.color)}">${esc(g.screenName)}</b> <span class="g-title">${esc(g.title)}</span>${g.xp ? ` <span class="tag">XP</span>` : ""}
+            <div class="g-blurb">${esc(g.blurb)}</div><div class="g-profile">“${esc(g.profile)}”</div></div>
+          <button class="xp g-add" style="min-width:0"${have ? " disabled" : ""}>${have ? "Added" : "Add"}</button>
+        </div>`;
+      }).join("")).join("");
+      box.querySelectorAll(".g-add").forEach((btn) => (btn.onclick = async () => {
+        const file = btn.closest(".g-item").dataset.file;
+        btn.disabled = true; btn.textContent = "Adding…";
+        try {
+          const r = await request({ type: "gallery_add", file });
+          if (r.error) throw new Error(r.error);
+          btn.textContent = "Added";
+          Sounds.signOn();
+          if (r.notes.length) xpAlert("Buddy Gallery", `<b>${esc(r.screenName)}</b> is on your agent list.<ul>${r.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>`, { icon: "add" });
+        } catch (e) { btn.disabled = false; btn.textContent = "Add"; xpAlert("Buddy Gallery", esc(e.message), { icon: "warn" }); }
+      }));
+      fitToContent(win);
+    };
+    state.onBuddies = render; // "Added" follows the agent list (e.g. after removing one)
+    render();
   }
 
   const viewFor = (win) => (win.startsWith("#") ? "room" : "im");
@@ -286,9 +332,10 @@
         else if (isRouter()) { Sounds.warn(); remote("approve", m.id); }
         break;
       case "approve_done":
-        if (VIEW === "approve" && ARG === m.id) { state.approveDone = true; window.ramNative.close(); }
+        if (VIEW === "approve" && ARG === m.id) { state.approveDone = true; window.y2kNative.close(); }
         break;
       case "hello":
+        if (VIEW === "viewer" && ARG) send({ type: "vm_watch", owner: ARG }); // (again after a reconnect)
         state.web = m.web || null;
         state.model = m.model; state.provider = m.provider; state.providers = m.providers || []; state.demoMode = m.demoMode; state.xp = m.xp;
         renderBanner();
@@ -306,6 +353,7 @@
         state.known = names;
         state.buddies = m.buddies;
         renderBuddyList();
+        state.onBuddies?.();
         for (const [name, im] of state.ims) name.startsWith("#") ? renderRoomPeople(im) : updateImChrome(name, im);
         break;
       }
@@ -336,7 +384,7 @@
         if (m.clientId && m.clientId === state.pendingRoom) {
           state.pendingRoom = null;
           openRoom(m.room);
-          if (VIEW === "invite") window.ramNative.close();
+          if (VIEW === "invite") window.y2kNative.close();
           else windows.get("invite")?.close();
         }
         break;
@@ -384,6 +432,19 @@
         hint.style.color = m.error ? "#b00" : "#3c9c2d";
         hint.textContent = m.error ? m.error : m.action === "vm_undo" ? `Went back to "${last?.label}"` : `Checkpoint saved (${m.checkpoints.length} kept)`;
         $(".undo", v.win.body).title = last ? `Go back to "${last.label}" (${new Date(last.at).toLocaleTimeString()})` : "No checkpoint yet";
+        break;
+      }
+      case "xp_ready":
+        state.xpReady = m.status;
+        state.onXpReady?.(m.error);
+        break;
+      case "vm_pasted": {
+        const v = state.viewers.get(m.owner);
+        if (!v) break;
+        $(".paste", v.win.body).disabled = false;
+        const hint = $(".hint", v.win.body);
+        hint.style.color = m.error ? "#b00" : "#3c9c2d";
+        hint.textContent = m.error ? m.error : `Typed ${m.chars} characters into XP` + (m.skipped ? ` (skipped ${m.skipped})` : "");
         break;
       }
       case "chatgpt":
@@ -484,11 +545,11 @@
         <button class="iconbtn" data-a="add" title="Add a buddy"><img src="icons/add.svg" alt="">Add</button>
         <button class="iconbtn" data-a="sound" title="Sounds on/off"><img class="snd" src="icons/sound.svg" alt="">Sound</button>
       </div>`;
-    $(".m-help", blist.body).onclick = openHelp;
     const selBuddy = () => (state.selected && getBuddy(state.selected)) || null;
     attachMenus($(".menubar", blist.body), {
       "My Agents": () => [
         { label: "Add a Buddy…", action: () => openAgentEditor() },
+        { label: "Buddy Gallery…", action: openGallery },
         { label: "Import a Buddy…", action: importBuddy },
         "-",
         { label: "Send Instant Message", disabled: !selBuddy(), action: () => openIM(state.selected) },
@@ -499,6 +560,12 @@
         { label: "Export Buddy with Memory…", disabled: !selBuddy() || selBuddy().capabilities.memory === false, action: () => exportBuddy(state.selected, true) },
         "-",
         { label: "Start a Chat Room…", action: () => openInvite("") },
+      ],
+      "Help": () => [
+        { label: "Help Topics", action: openHelp },
+        { label: "Check for Updates…", action: () => window.y2kNative.updateAction("check") },
+        "-",
+        { label: "About Y2Kbot", action: openAbout },
       ],
     });
     clearInterval(state.idleTimer);
@@ -519,7 +586,7 @@
         case "add": openAgentEditor(); break;
         case "sound": {
           const on = Sounds.toggle();
-          localStorage.setItem("ram.muted", on ? "0" : "1");
+          localStorage.setItem("y2k.muted", on ? "0" : "1");
           $(".snd", b).src = on ? "icons/sound.svg" : "icons/sound-off.svg";
           break;
         }
@@ -572,7 +639,7 @@
       hd.innerHTML = `<span class="tri">${open ? "▼" : "▶"}</span>${esc(g)} (${list.length}/${g === "Offline" ? 0 : list.length})`;
       hd.onclick = () => {
         open ? state.collapsed.add(g) : state.collapsed.delete(g);
-        localStorage.setItem("ram.collapsed", JSON.stringify([...state.collapsed]));
+        localStorage.setItem("y2k.collapsed", JSON.stringify([...state.collapsed]));
         renderBuddyList();
       };
       tree.appendChild(hd);
@@ -584,7 +651,7 @@
         row.title = (pr.state === "away" ? `Away: ${pr.why}` : pr.state === "idle" ? `Idle for ${fmtIdle(pr.idle)}` : (b.profile || "").slice(0, 200)) + `\n${routeText(b)}`;
         row.innerHTML = `<img class="av" src="${avatarUrl(b)}" alt=""><span class="ico">${b.busy ? "⌛" : pr.state === "away" ? "✎" : ""}</span><span class="sn"></span>${pr.state === "idle" ? `<span class="idle-t">(${fmtIdle(pr.idle)})</span>` : ""}${b.capabilities.xp ? `<span class="tag ${b.vm ? "run" : ""}">${b.vm ? "XP ON" : "XP"}</span>` : ""}${b.capabilities.imBuddies ? `<span class="tag">LEAD</span>` : ""}`;
         $(".sn", row).textContent = b.screenName;
-        row.onclick = () => { state.selected = b.screenName; localStorage.setItem("ram.selected", b.screenName); renderBuddyList(); };
+        row.onclick = () => { state.selected = b.screenName; localStorage.setItem("y2k.selected", b.screenName); renderBuddyList(); };
         row.ondblclick = () => openIM(b.screenName);
         tree.appendChild(row);
       }
@@ -658,7 +725,7 @@
     $(".share", win.body).onclick = () => {
       const dir = getBuddy(name)?.sharedDir;
       if (!dir) return;
-      window.ramNative.openPath(dir);
+      window.y2kNative.openPath(dir);
     };
     setupAttachments(im);
     win.body.querySelectorAll(".fmtbar button").forEach((b) => (b.onclick = () => fmt(im, b.dataset.f)));
@@ -677,7 +744,7 @@
           { label: "Get Info", action: () => openInfo(name) },
           { label: "Buddy Setup…", disabled: !b, action: () => openAgentEditor(b) },
           b?.capabilities.xp ? { label: "Watch XP", action: () => openViewer(name, b?.vm ?? null) } : null,
-          b?.sharedDir ? { label: "Open Shared Folder", action: () => window.ramNative.openPath(b.sharedDir) } : null,
+          b?.sharedDir ? { label: "Open Shared Folder", action: () => window.y2kNative.openPath(b.sharedDir) } : null,
           "-",
           { label: "Warn", action: () => $(".warn", win.body).click() },
           { label: "Block (stop working)", action: () => send({ type: "stop", who: name }) },
@@ -700,7 +767,7 @@
     { label: "Save Conversation as Text…", action: () => saveConversation(im.name, "txt") },
     { label: "Save Conversation as Web Page…", action: () => saveConversation(im.name, "html") },
     "-",
-    { label: "Open Chat Logs Folder", action: () => window.ramNative.openDataFolder("logs") },
+    { label: "Open Chat Logs Folder", action: () => window.y2kNative.openDataFolder("logs") },
     "-",
     { label: "Close", key: "Alt+F4", action: () => im.win.close() },
   ];
@@ -981,7 +1048,7 @@
     const existing = state.rooms.find((r) => r.name === room);
     const win = createWindow({ id: "invite", title: existing ? `Invite to ${room}` : "Buddy Chat Invitation", cls: "dialog" });
     const candidates = state.buddies.filter((b) => !existing?.members.includes(b.screenName));
-    const preselect = state.selected || localStorage.getItem("ram.selected"); // the agent list is another window in the app
+    const preselect = state.selected || localStorage.getItem("y2k.selected"); // the agent list is another window in the app
     win.body.innerHTML = `
       <div class="content">
         ${existing ? `<div>Pick buddies to invite to <b>${esc(room)}</b>:</div>` : `<b>Chat room name</b><input type="text" class="f-room" maxlength="24" placeholder="e.g. dev-huddle">`}
@@ -1264,12 +1331,12 @@
         <label class="row"><input type="checkbox" class="ap-always"> Don't ask again when ${esc(m.who)} uses this tool</label>
       </div>
       <div class="buttons"><button class="xp ap-yes">Allow</button><button class="xp ap-no"><b>Don't Allow</b></button></div>`;
-    const answer = (ok) => { state.approveDone = true; send({ type: "approve_reply", id: m.id, ok, always: ok && $(".ap-always", win.body).checked }); window.ramNative.close(); };
+    const answer = (ok) => { state.approveDone = true; send({ type: "approve_reply", id: m.id, ok, always: ok && $(".ap-always", win.body).checked }); window.y2kNative.close(); };
     $(".ap-yes", win.body).onclick = () => answer(true);
     $(".ap-no", win.body).onclick = () => answer(false);
     addEventListener("keydown", (e) => { if (e.key === "Escape") answer(false); });
     $(".ap-no", win.body).focus(); // the safe choice is the default
-    window.ramNative.flash();
+    window.y2kNative.flash();
     fitToContent(win);
   }
 
@@ -1392,6 +1459,7 @@
         <span class="live">● LIVE</span>
         <span class="hint" style="font-size:10px;color:#555">click the screen to take the mouse</span>
         <span class="spacer"></span>
+        <button class="xp paste" title="Type the text on your clipboard into XP, where the cursor is (or press Ctrl+V on this window)">Paste</button>
         <button class="xp cp" title="Save the machine as it is now, so you (or the buddy) can go back to it">Checkpoint</button>
         <button class="xp undo" title="Go back to the latest checkpoint">Undo</button>
         <button class="xp on">Power on</button>
@@ -1399,6 +1467,7 @@
         <button class="xp off">Pull the plug</button>
       </div>`;
     v = { win, vm, img: $("img", win.body), ph: $(".placeholder", win.body), live: $(".live", win.body) };
+    send({ type: "vm_watch", owner }); // live frames for this machine
     state.viewers.set(owner, v);
     const frame = state.frames.get(owner);
     if (frame) { v.img.src = "data:image/png;base64," + frame; v.img.style.display = ""; v.ph.style.display = "none"; }
@@ -1423,6 +1492,23 @@
       const btn = $(c, win.body);
       btn.onclick = () => { btn.disabled = true; send({ type, owner }); setTimeout(() => (btn.disabled = false), 4000); };
     }
+    // Clipboard → XP: typed in, key by key, at XP's cursor.
+    const paste = async () => {
+      const btn = $(".paste", win.body), hint = $(".hint", win.body);
+      if (btn.disabled) return;
+      const text = (await window.y2kNative.readClipboard()).replace(/\r\n?/g, "\n");
+      hint.style.color = "#b00";
+      if (!text) { hint.textContent = "Your clipboard has no text."; return; }
+      if (text.length > 4000) { hint.textContent = "That's too much to type in (4,000 characters max). Put it in the shared folder instead."; return; }
+      btn.disabled = true;
+      hint.style.color = "#555";
+      hint.textContent = `Typing ${text.length} characters into XP…` + (text.length > 200 ? ` (about ${Math.ceil(text.length / 12)} s)` : "");
+      send({ type: "vm_paste", owner, text });
+    };
+    $(".paste", win.body).onclick = paste;
+    document.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v" && state.viewers.get(owner) === v) { e.preventDefault(); paste(); }
+    });
     if (vm) { v.live.textContent = "● LIVE"; v.live.style.color = ""; }
     return v;
   }
@@ -1506,7 +1592,7 @@
         </fieldset>
       </div>
       <div class="buttons">
-        ${existing ? `<button class="xp del" style="margin-right:auto">Remove Buddy</button>` : `<button class="xp imp" style="margin-right:auto" title="Add a buddy from a .y2kbuddy file">Import…</button>`}
+        ${existing ? `<button class="xp del" style="margin-right:auto">Remove Buddy</button>` : `<button class="xp gal" title="Pick a ready-made buddy">Gallery…</button><button class="xp imp" style="margin-right:auto" title="Add a buddy from a .y2kbuddy file">Import…</button>`}
         <button class="xp cancel">Cancel</button><button class="xp save"><b>${existing ? "Save" : "Add"}</b></button>
       </div>`;
     const f = (c) => $(c, win.body);
@@ -1517,7 +1603,10 @@
     const pickUi = () => win.body.querySelectorAll(".icon-pick button").forEach((b) => b.classList.toggle("on", b.dataset.icon === icon));
     win.body.querySelectorAll(".icon-pick button").forEach((b) => (b.onclick = () => { icon = b.dataset.icon; pickUi(); }));
     pickUi();
-    if (!existing) f(".imp").onclick = () => { win.close(); importBuddy(); };
+    if (!existing) {
+      f(".imp").onclick = async () => { if (await importBuddy()) win.close(); };
+      f(".gal").onclick = () => { remote("gallery"); win.close(); };
+    }
     // a model written as "ollama:llama3.2" picks the provider too
     let startModel = a.model || "";
     const pm = /^([a-z0-9-]+):(.+)$/.exec(startModel);
@@ -1548,6 +1637,60 @@
       setTimeout(() => win.close(), 50);
     };
     fitToContent(win);
+  }
+
+  async function openAbout() {
+    const u = await window.y2kNative.getUpdate();
+    xpAlert("About Y2Kbot", `<b>Y2Kbot</b> version ${esc(u.current)}<br>An agent harness that looks like a turn-of-the-millennium instant messenger.<br><br>
+      <a href="https://github.com/tatethedeveloper/Y2KBot" target="_blank" rel="noopener">github.com/tatethedeveloper/Y2KBot</a>`, { icon: "info" });
+  }
+
+  // ================= updates (the main process talks to GitHub Releases) =================
+  async function openUpdate() {
+    const win = createWindow({ id: "update", title: "Y2Kbot Update", cls: "dialog updatewin" });
+    const render = (u) => {
+      const pct = Math.max(0, Math.min(100, u.percent || 0));
+      let text = "", buttons = "";
+      switch (u.state) {
+        case "checking": text = "Looking for a newer version…"; buttons = `<button class="xp u-close">Close</button>`; break;
+        case "none": text = `You have the latest version (${esc(u.current)}).`; buttons = `<button class="xp u-close"><b>OK</b></button>`; break;
+        case "available":
+          text = `<b>Y2Kbot ${esc(u.version)}</b> is available. You have ${esc(u.current)}.`
+            + (u.manual ? `<div class="u-note">Download the new version from the releases page and install it over this one. Your buddies and settings are kept.</div>` : "");
+          buttons = `<button class="xp u-skip" style="min-width:0">Skip This Version</button><span class="spacer"></span><button class="xp u-close">Later</button><button class="xp u-get"><b>${u.manual ? "Download…" : "Download"}</b></button>`;
+          break;
+        case "downloading":
+          text = `Downloading Y2Kbot ${esc(u.version)}…<div class="u-bar"><div style="width:${pct}%"></div></div><div class="u-note">${pct}%</div>`;
+          buttons = `<button class="xp u-close">Hide</button>`;
+          break;
+        case "ready":
+          text = `Y2Kbot ${esc(u.version)} is downloaded. Restart to finish installing.<div class="u-note">Running buddies and XP machines will stop. Your chats, buddies and settings are kept.</div>`;
+          buttons = `<button class="xp u-close">Later</button><button class="xp u-install"><b>Restart Now</b></button>`;
+          break;
+        case "error":
+          text = `Couldn't check for updates.<div class="u-note">${esc(u.error)}</div>`;
+          buttons = `<button class="xp u-rel" style="min-width:0">Releases Page</button><span class="spacer"></span><button class="xp u-close"><b>OK</b></button>`;
+          break;
+        default: text = "No update check yet."; buttons = `<button class="xp u-check">Check Now</button><button class="xp u-close">Close</button>`;
+      }
+      const notes = u.notes && ["available", "downloading", "ready"].includes(u.state) ? `<b>What's new</b><div class="u-notes inset">${esc(u.notes)}</div>` : "";
+      win.body.innerHTML = `
+        <div class="content">
+          <div class="u-top"><img src="icons/update.svg" alt="" width="32" height="32"><div>${text}</div></div>
+          ${notes}
+        </div>
+        <div class="buttons">${buttons}</div>`;
+      const on = (c, fn) => { const b = $(c, win.body); if (b) b.onclick = fn; };
+      on(".u-close", () => window.y2kNative.close());
+      on(".u-get", () => { window.y2kNative.updateAction("download"); if (u.manual) window.y2kNative.close(); });
+      on(".u-install", () => window.y2kNative.updateAction("install"));
+      on(".u-skip", () => { window.y2kNative.updateAction("skip"); window.y2kNative.close(); });
+      on(".u-rel", () => window.y2kNative.updateAction("releases"));
+      on(".u-check", () => window.y2kNative.updateAction("check"));
+      fitToContent(win);
+    };
+    window.y2kNative.onUpdate(render);
+    render(await window.y2kNative.getUpdate());
   }
 
   function openHelp() {
@@ -1596,7 +1739,7 @@
 
   async function openPrefs() {
     if (!isMine("prefs")) return remote("prefs");
-    const s = await window.ramNative.getSettings();
+    const s = await window.y2kNative.getSettings();
     const win = createWindow({ id: "prefs", title: "Preferences", cls: "dialog" });
     const h = s.health;
     win.body.innerHTML = `
@@ -1626,11 +1769,12 @@
           </div>
           <label class="row"><input type="checkbox" class="p-private"> Let buddies fetch pages on my local network <span style="font-size:10px;color:#555">(off = safer)</span></label>
         </fieldset>
-        <fieldset class="groupbox"><legend>Chat logs</legend>
+        <fieldset class="groupbox"><legend>General</legend>
           <div style="display:flex;align-items:center;gap:6px">
             <label class="row" style="flex:1"><input type="checkbox" class="p-logs"> Keep a log of every conversation <span style="font-size:10px;color:#555">(one web page per buddy per day)</span></label>
             <button class="xp p-logs-open" style="min-width:0">Open logs…</button>
           </div>
+          <label class="row"><input type="checkbox" class="p-updates"> Check for new versions when Y2Kbot starts</label>
         </fieldset>
         <fieldset class="groupbox"><legend>Windows XP machines</legend>
           <b>XP base disk image (.qcow2)</b>
@@ -1667,6 +1811,8 @@
             <option value="usb">USB drive (allows checkpoints / undo)</option>
             <option value="ide">Hard disk (older; no undo)</option>
           </select></label>
+          <label class="row"><input type="checkbox" class="p-instant"> Instant boot: start machines from a saved desktop</label>
+          <div class="p-ib" style="font-size:10px;margin:0 0 0 20px"></div>
           <div class="p-status" style="font-size:10px;margin-top:6px"></div>
         </fieldset>
       </div>
@@ -1720,7 +1866,8 @@
     f(".p-mem").value = s.xpMemoryMb; f(".p-max").value = s.xpMaxVms; f(".p-net").value = s.xpNetwork;
     f(".p-search").value = s.searchProvider || ""; f(".p-searx").value = s.searxngUrl || ""; f(".p-private").checked = !!s.webAllowPrivate;
     f(".p-logs").checked = !!s.chatLogs;
-    f(".p-logs-open").onclick = () => window.ramNative.openDataFolder("logs");
+    f(".p-updates").checked = s.checkUpdates !== false;
+    f(".p-logs-open").onclick = () => window.y2kNative.openDataFolder("logs");
     const searchUi = () => {
       const p = f(".p-search").value;
       f(".p-search-key").style.display = p === "brave" || p === "tavily" ? "" : "none";
@@ -1732,34 +1879,60 @@
     f(".p-search").onchange = searchUi; searchUi();
     f(".p-accel").value = s.xpAccel || ""; f(".p-cpu").value = s.xpCpu || "pentium3"; f(".p-acpi").checked = !!s.xpAcpi; f(".p-share").checked = s.xpShare !== false;
     f(".p-bus").value = s.xpShareBus === "ide" ? "ide" : "usb";
+    f(".p-instant").checked = s.xpInstantBoot !== false;
+    // Instant boot: saved live, using the settings the app is running with now.
+    const ibBox = f(".p-ib");
+    const renderReady = (error) => {
+      if (!document.body.contains(ibBox)) { state.onXpReady = null; return; }
+      const r = state.xpReady;
+      if (!f(".p-instant").checked || !r) { ibBox.innerHTML = ""; fitToContent(win); return; }
+      const when = r.at ? ` Saved ${new Date(r.at).toLocaleDateString()}${r.sizeMb ? `, ${r.sizeMb} MB` : ""}.` : "";
+      const color = r.state === "ready" ? "#3c9c2d" : r.state === "outdated" || r.state === "unsupported" ? "#b00" : "#555";
+      let html = `<span style="color:${color}">${esc(r.detail)}${r.state === "ready" ? esc(when) : ""}</span>`;
+      if (r.state === "none" || r.state === "outdated" || r.state === "ready")
+        html += `<div style="margin-top:3px"><button class="xp ib-prep" style="min-width:0">${r.state === "ready" ? "Save again" : "Prepare instant boot"}</button>`
+          + (r.state !== "none" ? ` <button class="xp ib-del" style="min-width:0">Delete</button>` : "") + `</div>`;
+      if (r.state === "none") html += `<div style="color:#555;margin-top:2px">Boots XP once in the background (a few minutes), waits for the desktop and saves it. Uses the settings you've saved.</div>`;
+      if (error) html += `<div style="color:#b00">${esc(error)}</div>`;
+      ibBox.innerHTML = html;
+      const prep = $(".ib-prep", ibBox), del = $(".ib-del", ibBox);
+      if (prep) prep.onclick = () => { prep.disabled = true; send({ type: "xp_ready_prepare" }); };
+      if (del) del.onclick = () => { del.disabled = true; send({ type: "xp_ready_discard" }); };
+      fitToContent(win);
+    };
+    state.onXpReady = renderReady;
+    f(".p-instant").addEventListener("change", () => renderReady());
+    send({ type: "xp_ready_get" });
     const busUi = () => { f(".p-bus-row").style.display = f(".p-share").checked ? "" : "none"; };
     f(".p-share").addEventListener("change", busUi); busUi();
     const st = f(".p-status");
     if (h?.xp?.ok) { st.style.color = "#3c9c2d"; st.textContent = `✔ Ready to boot XP (acceleration: ${h.xp.accel}, CPU: ${h.xp.cpu}, ACPI ${h.xp.acpi ? "on" : "off"})`; }
     else if (h) { st.style.color = "#b00"; st.textContent = "✖ " + h.xp.problems.join(" "); }
-    f(".b-img").onclick = async () => { const p = await window.ramNative.pickFile({ title: "Choose your XP disk image", filters: [{ name: "QEMU disk", extensions: ["qcow2", "img"] }, { name: "All files", extensions: ["*"] }] }); if (p) f(".p-img").value = p; };
-    f(".b-qemu").onclick = async () => { const p = await window.ramNative.pickFile({ title: "Find qemu-system-i386" }); if (p) f(".p-qemu").value = p; };
+    f(".b-img").onclick = async () => { const p = await window.y2kNative.pickFile({ title: "Choose your XP disk image", filters: [{ name: "QEMU disk", extensions: ["qcow2", "img"] }, { name: "All files", extensions: ["*"] }] }); if (p) f(".p-img").value = p; };
+    f(".b-qemu").onclick = async () => { const p = await window.y2kNative.pickFile({ title: "Find qemu-system-i386" }); if (p) f(".p-qemu").value = p; };
     f(".cancel").onclick = () => win.close();
     f(".save").onclick = async () => {
-      await window.ramNative.saveSettings({
+      await window.y2kNative.saveSettings({
         provider: f(".p-provider").value, model: picker.value,
         keys: { ...Object.fromEntries([...win.body.querySelectorAll(".ptable tr")].filter((r) => $(".p-key", r)).map((r) => [r.dataset.id, $(".p-key", r).value])),
           ...(["brave", "tavily"].includes(f(".p-search").value) ? { [f(".p-search").value]: f(".p-search-key").value } : {}) },
-        searchProvider: f(".p-search").value, searxngUrl: f(".p-searx").value.trim(), webAllowPrivate: f(".p-private").checked, chatLogs: f(".p-logs").checked,
+        searchProvider: f(".p-search").value, searxngUrl: f(".p-searx").value.trim(), webAllowPrivate: f(".p-private").checked, chatLogs: f(".p-logs").checked, checkUpdates: f(".p-updates").checked,
         baseUrls: Object.fromEntries([...win.body.querySelectorAll(".ptable tr")].filter((r) => $(".p-url", r)).map((r) => [r.dataset.id, $(".p-url", r).value])),
         xpBaseImage: f(".p-img").value.trim(),
         qemuBin: f(".p-qemu").value.trim(), xpMemoryMb: f(".p-mem").value, xpMaxVms: f(".p-max").value, xpNetwork: f(".p-net").value,
         xpAccel: f(".p-accel").value, xpCpu: f(".p-cpu").value, xpAcpi: f(".p-acpi").checked, xpShare: f(".p-share").checked, xpShareBus: f(".p-bus").value,
+        xpInstantBoot: f(".p-instant").checked,
       });
-      window.ramNative.relaunch();
+      window.y2kNative.relaunch();
     };
     fitToContent(win);
   }
 
   // ================= boot =================
-  if (localStorage.getItem("ram.muted") === "1" && !Sounds.muted) Sounds.toggle();
+  if (localStorage.getItem("y2k.muted") === "1" && !Sounds.muted) Sounds.toggle();
 
   if (VIEW === "signon") showSignOn();
+  else if (VIEW === "update") openUpdate();
   else if (VIEW === "prefs") connect(() => openPrefs());
   else connect(() => {
     switch (VIEW) {
@@ -1774,12 +1947,13 @@
       case "info": openInfo(ARG); break;
       case "editor": openAgentEditor(ARG ? getBuddy(ARG) : null); break;
       case "help": openHelp(); break;
+      case "gallery": openGallery(); break;
       case "approve": // the request itself arrives right after the buddy list
         setTimeout(() => {
           if (state.approveShown) return;
           const w = createWindow({ id: "approve", title: "Y2Kbot", cls: "dialog" });
           w.body.innerHTML = `<div class="content">That request has already been answered.</div>`;
-          setTimeout(() => window.ramNative.close(), 1500);
+          setTimeout(() => window.y2kNative.close(), 1500);
         }, 1500);
         break;
     }

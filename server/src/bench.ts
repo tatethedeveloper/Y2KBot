@@ -209,7 +209,9 @@ export class Bench extends EventEmitter {
   }
 
   deleteRun(runId: string) {
-    const base = path.join(this.dir, "runs", path.basename(runId));
+    // "" or "." would name the runs folder itself, and delete every run
+    if (!/^[\w.-]+$/.test(runId) || /^\.+$/.test(runId)) return;
+    const base = path.join(this.dir, "runs", runId);
     rmSync(base + ".json", { force: true });
     rmSync(base, { recursive: true, force: true });
   }

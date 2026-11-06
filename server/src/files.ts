@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import path from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { pdfToText } from "./web.js";
+import { safeSegment } from "./agents.js";
 
 export const MAX_FILE = 25 * 1024 * 1024;
 const INLINE_CHARS = 20000; // how much text goes straight into the message; the rest via read_file
@@ -32,7 +33,7 @@ export class AttachmentStore {
   constructor(private root: string) { mkdirSync(root, { recursive: true }); }
 
   dir(window: string) {
-    const d = path.join(this.root, window.replace(/[^\w.\- #]/g, "_").replace(/^#/, "room-"));
+    const d = path.join(this.root, safeSegment(window.replace(/^#/, "room-")));
     mkdirSync(d, { recursive: true });
     return d;
   }

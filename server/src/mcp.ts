@@ -113,6 +113,8 @@ export class McpManager extends EventEmitter {
       }
       if (gen !== this.generation) { await client.close().catch(() => {}); return; }
       const listed = await withTimeout(client.listTools(), 30_000, "listing tools timed out");
+      // reconnected while listing: this connection was already replaced, so don't leave it running
+      if (gen !== this.generation) { await client.close().catch(() => {}); return; }
       conn.client = client;
       for (const t of listed.tools) {
         let full = `mcp__${safe(name)}__${safe(t.name)}`.slice(0, 64);

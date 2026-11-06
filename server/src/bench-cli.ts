@@ -30,8 +30,8 @@ if (existsSync(settingsFile)) {
   try {
     const s = JSON.parse(readFileSync(settingsFile, "utf8"));
     const set = (env: string, v: unknown) => { if (v !== undefined && v !== null && v !== "" && process.env[env] === undefined) process.env[env] = String(v); };
-    set("RAM_PROVIDER", s.provider);
-    set("RAM_MODEL", s.model);
+    set("Y2K_PROVIDER", s.provider);
+    set("Y2K_MODEL", s.model);
     set("XP_BASE_IMAGE", s.xpBaseImage);
     set("QEMU_BIN", s.qemuBin);
     set("XP_MEMORY_MB", s.xpMemoryMb);
@@ -86,7 +86,7 @@ async function main() {
 
   try {
     const rec = await bench.run({
-      provider: arg("provider") ?? process.env.RAM_PROVIDER ?? "anthropic",
+      provider: arg("provider") ?? process.env.Y2K_PROVIDER ?? "anthropic",
       model: arg("model")!,
       coords: arg("coords") as any,
       taskIds: arg("tasks")?.split(",").map((s) => s.trim()).filter(Boolean),

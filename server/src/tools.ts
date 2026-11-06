@@ -31,8 +31,12 @@ export interface ToolCtx {
   ocr: Ocr;
   skills: SkillStore;
   /** Ask the user (XP-style "Are you sure?") before a risky MCP action. */
-  approve: (req: ToolRisk & { who: string; args: unknown }) => Promise<"yes" | "no" | "timeout" | "nobody">;
+  approve: (req: ToolRisk & { who: string; args: unknown }, signal?: AbortSignal) => Promise<"yes" | "no" | "timeout" | "nobody" | "stopped">;
   depth: number;
+  /** aborted when the user presses Stop */
+  signal?: AbortSignal;
+  /** inside xp_do: steps report text only (one screenshot comes at the end) */
+  batch?: boolean;
   imBuddy: (to: string, text: string) => Promise<string>;
 }
 
@@ -63,6 +67,44 @@ const xpTools = (m: CoordMode): Anthropic.Tool[] => {
     return { ...t, description: `${t.description} ${coordHelp(m)}`, input_schema: { ...(t.input_schema as any), properties: props } };
   });
 };
+
+/** xp_do step kinds → the single-action tool each one runs */
+const DO_STEPS: Record<string, string> = {
+  click: "xp_click", click_text: "xp_click_text", type: "xp_type", key: "xp_key",
+  scroll: "xp_scroll", drag: "xp_drag", wait: "xp_wait", run: "xp_run",
+};
+const MAX_DO_STEPS = 12;
+
+const xpDo = (m: CoordMode): Anthropic.Tool => ({
+  name: "xp_do",
+  description:
+    "Do several XP actions in one go, with one screenshot at the end: much faster than one tool call per action. " +
+    "Use it whenever you already know the next few steps, e.g. open a menu and pick an item, fill in a dialog and confirm, or type text and save: " +
+    '[{"do":"click_text","text":"File"},{"do":"click_text","text":"Save As..."},{"do":"type","text":"report.txt"},{"do":"key","combo":"enter"}]. ' +
+    "Each step waits for the screen to settle before the next one starts. If a step fails (e.g. a label isn't on screen) the rest are skipped and you're told which step failed, with a screenshot. " +
+    "Step kinds and their fields: click (x, y, button, double), click_text (text, nth, double, button), type (text), key (combo), scroll (x, y, direction, amount), drag (x1, y1, x2, y2), wait (seconds, max 10), run (command). " +
+    `Use single tools instead when you need to see the result of one action before choosing the next. Up to ${MAX_DO_STEPS} steps. ${coordHelp(m)}`,
+  input_schema: {
+    type: "object",
+    properties: {
+      steps: {
+        type: "array", minItems: 1, maxItems: MAX_DO_STEPS,
+        items: {
+          type: "object",
+          properties: {
+            do: { type: "string", enum: Object.keys(DO_STEPS) },
+            x: { type: "integer" }, y: { type: "integer" }, x1: { type: "integer" }, y1: { type: "integer" }, x2: { type: "integer" }, y2: { type: "integer" },
+            text: { type: "string" }, nth: { type: "integer", minimum: 1 }, combo: { type: "string" }, command: { type: "string" },
+            button: { type: "string", enum: ["left", "right", "middle"] }, double: { type: "boolean" },
+            direction: { type: "string", enum: ["up", "down"] }, amount: { type: "integer" }, seconds: { type: "integer", minimum: 1, maximum: 10 },
+          },
+          required: ["do"],
+        },
+      },
+    },
+    required: ["steps"],
+  },
+});
 
 const XP_GUIDE: Anthropic.Tool = {
   name: "xp_guide",
@@ -147,7 +189,7 @@ const XP_TOOLS_BASE: Anthropic.Tool[] = [
   {
     name: "xp_boot",
     description:
-      "Boot your own fresh, disposable Windows XP virtual machine. Booting takes 30–90 seconds; afterwards use xp_wait and xp_screenshot until the desktop appears. Everything you do is thrown away when the machine shuts down.",
+      "Boot your own fresh, disposable Windows XP virtual machine. The result says whether it started straight at the desktop (instant boot) or is booting from cold (30–90 seconds; use xp_wait and xp_screenshot until the desktop appears). Everything you do is thrown away when the machine shuts down.",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -297,7 +339,7 @@ export function toolsFor(
   const tools: Anthropic.Tool[] = [READ_FILE];
   if (hasWeb(agent)) { if (searchReady(opts.search)) tools.push(WEB_SEARCH); tools.push(WEB_FETCH); }
   tools.push(...opts.mcp.toolsFor(agent.mcp));
-  if (agent.capabilities.xp) tools.push(XP_GUIDE, ...(hasXpCmd(agent) ? [XP_CMD] : []), ...xpTools(opts.coordMode), ...XP_UNDO_TOOLS);
+  if (agent.capabilities.xp) tools.push(XP_GUIDE, ...(hasXpCmd(agent) ? [XP_CMD] : []), ...xpTools(opts.coordMode), xpDo(opts.coordMode), ...XP_UNDO_TOOLS);
   if (agent.capabilities.xp && opts.shared) tools.push(...SHARED_TOOLS);
   if (hasMemory(agent)) tools.push(...MEMORY_TOOLS);
   if (hasSkills(agent)) tools.push(...SKILL_TOOLS);
@@ -358,6 +400,10 @@ function px(ctx: ToolCtx, x: unknown, y: unknown): [number, number] {
 
 /** Wait for the screen to stop changing, then return it with a note about what happened. */
 const shot = async (ctx: ToolCtx, note: string, maxMs = 8000): Promise<ToolResultContent> => {
+  if (ctx.batch) { // xp_do: wait for the screen, but the screenshot comes once at the end
+    const r = await ctx.vms.settle(ctx.agent.screenName, { maxMs: Math.min(maxMs, 5000), intervalMs: 250, minMs: 200 });
+    return r.settled ? note : `${note} (screen still changing after ${(r.ms / 1000).toFixed(0)}s)`;
+  }
   const r = await ctx.vms.settle(ctx.agent.screenName, { maxMs });
   const timing = r.settled
     ? `Screen settled after ${(r.ms / 1000).toFixed(1)}s.`
@@ -396,10 +442,11 @@ export async function runTool(name: string, input: any, ctx: ToolCtx): Promise<T
     if (ctx.mcp.owns(name)) {
       const risk = ctx.mcp.risk(name);
       if (risk?.ask) {
-        const answer = await ctx.approve({ ...risk, who: me, args: input });
+        const answer = await ctx.approve({ ...risk, who: me, args: input }, ctx.signal);
         if (answer !== "yes") {
           const why = answer === "no" ? `The user said no to ${risk.tool}. Don't retry it; ask them what they'd like instead, or find another way.`
             : answer === "timeout" ? `Nobody answered the request to approve ${risk.tool} within 5 minutes, so it wasn't run.`
+            : answer === "stopped" ? `You were stopped before ${risk.tool} was approved, so it wasn't run.`
             : `${risk.tool} needs the user's approval, but no Y2Kbot window is open to ask, so it wasn't run.`;
           return { content: why, isError: true, status: answer === "no" ? `was told no to ${risk.tool}` : `couldn't get approval for ${risk.tool}` };
         }
@@ -441,7 +488,39 @@ export async function runTool(name: string, input: any, ctx: ToolCtx): Promise<T
       }
       case "xp_boot": {
         const vm = await ctx.vms.boot(me);
+        if (vm.instant) return { content: `${vm.id} started from the saved desktop and is ready now. Its clock may be behind. Take a screenshot.`, status: `started Windows XP (${vm.id})` };
         return { content: `${vm.id} is powering on. Wait ~30s and take a screenshot.`, status: `is booting Windows XP (${vm.id})...` };
+      }
+      case "xp_do": {
+        const steps: any[] = Array.isArray(input.steps) ? input.steps.slice(0, MAX_DO_STEPS) : [];
+        if (!steps.length) throw new Error('Give a list of steps, e.g. [{"do":"key","combo":"ctrl+s"}]');
+        const done: string[] = [];
+        const label = (st: any) => `${st.do}${st.text != null ? ` "${String(st.text).slice(0, 40)}"` : st.combo ? ` ${st.combo}` : st.command ? ` ${String(st.command).slice(0, 40)}` : st.x != null ? ` (${st.x}, ${st.y})` : ""}`;
+        const textOf = (c: ToolResultContent) => typeof c === "string" ? c : (c ?? []).map((b) => (b.type === "text" ? b.text : "")).join(" ");
+        let failure = "";
+        for (const [i, st] of steps.entries()) {
+          if (ctx.signal?.aborted) { failure = `Stopped before step ${i + 1}.`; break; }
+          const tool = DO_STEPS[String(st?.do)];
+          if (!tool) { failure = `Step ${i + 1} has an unknown kind "${st?.do}". Use one of: ${Object.keys(DO_STEPS).join(", ")}.`; break; }
+          const args = { ...st };
+          delete args.do;
+          if (tool === "xp_wait") args.seconds = Math.min(10, Number(args.seconds) || 2);
+          const r = await runTool(tool, args, { ...ctx, batch: true });
+          const said = textOf(r.content).replace(/\s+/g, " ").trim();
+          if (r.isError) { failure = `Step ${i + 1} (${label(st)}) failed: ${said}`; break; }
+          done.push(`${i + 1}. ${label(st)}: ${said.slice(0, 200)}`);
+        }
+        const skipped = steps.length - done.length - (failure && !failure.startsWith("Stopped") ? 1 : 0);
+        const summary = [
+          done.length ? `Done:\n${done.join("\n")}` : "No steps were done.",
+          failure ? `${failure}${skipped > 0 ? ` The ${skipped} step${skipped > 1 ? "s" : ""} after it ${skipped > 1 ? "were" : "was"} not run.` : ""}` : "",
+          "Here's the screen now.",
+        ].filter(Boolean).join("\n\n");
+        return {
+          content: await shot(ctx, summary, 4000),
+          isError: !!failure,
+          status: failure ? `got ${done.length} of ${steps.length} XP steps done` : `did ${steps.length} XP step${steps.length > 1 ? "s" : ""} (${steps.slice(0, 3).map(label).join(", ")}${steps.length > 3 ? ", …" : ""})`,
+        };
       }
       case "xp_screenshot":
         return { content: await shot(ctx, "Screenshot.", 3000), status: "is looking at the XP screen" };
@@ -461,7 +540,7 @@ export async function runTool(name: string, input: any, ctx: ToolCtx): Promise<T
         const cmd = String(input.command ?? "").replace(/[\r\n]+/g, " & ").trim();
         if (!cmd) throw new Error("Give a command, e.g. dir C:\\");
         const secs = Math.max(5, Math.min(600, Number(input.timeout_seconds) || 60));
-        const r = await ctx.vms.cmd(me, cmd, secs * 1000);
+        const r = await ctx.vms.cmd(me, cmd, secs * 1000, ctx.signal);
         const out = r.output ? clip(r.output) : "(no output)";
         const head = !r.finished
           ? `Still running after ${secs}s. Its console window is still open and will close when it finishes. Output so far:`
@@ -555,7 +634,7 @@ export async function runTool(name: string, input: any, ctx: ToolCtx): Promise<T
         return { content: await shot(ctx, "Scrolled."), status: `scrolled ${input.direction}` };
       case "xp_wait": {
         const s = Math.max(1, Math.min(60, Number(input.seconds) || 5));
-        await sleep(s * 1000);
+        await sleep(s * 1000, undefined, { signal: ctx.signal });
         return { content: await shot(ctx, `Waited ${s}s.`, 4000), status: `is waiting ${s}s for XP...` };
       }
       case "xp_shutdown": {

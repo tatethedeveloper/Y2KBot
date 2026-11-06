@@ -35,6 +35,20 @@ npm run dist:mac     # .dmg (build this on a Mac)
 npm run dist:linux   # AppImage + .deb
 ```
 
+### Updates
+
+The installed app checks GitHub Releases at startup (and every 6 hours). When there's a new version it opens an update window with the release notes: **Download**, then **Restart Now**. Buddies, chats and settings are kept. **Help → Check for Updates…** checks on demand, **Skip This Version** stops it asking about that one, and Prefs → General turns the startup check off.
+
+On Windows and with the Linux AppImage the update installs itself. macOS only lets signed apps update themselves, so on a Mac (and with the .deb) **Download…** opens the releases page instead.
+
+**Publishing a release** (maintainers): bump `version` in `package.json`, then run
+
+```bash
+GH_TOKEN=<a token with repo access> npm run release   # PowerShell: $env:GH_TOKEN="..."; npm run release
+```
+
+This builds the installer and uploads it, with the `latest.yml` file the updater reads, to a **draft** release for that version. Add the release notes on GitHub and press **Publish**. Apps only see a release once it's published.
+
 ### Where your data lives
 
 Everything personal is in the app's data folder: `%APPDATA%\Y2Kbot` on Windows, `~/Library/Application Support/Y2Kbot` on macOS, `~/.config/Y2Kbot` on Linux.
@@ -50,6 +64,7 @@ Everything personal is in the app's data folder: `%APPDATA%\Y2Kbot` on Windows, 
 | `mcp.json`, `approvals.json` | MCP servers, and the tools you've said "don't ask again" for |
 | `chatgpt-signin.json` | the ChatGPT sign-in (tokens encrypted) |
 | `logs/` | chat logs, if you turn them on |
+| `xp-ready/` | the saved XP desktop for instant boot (memory + disk changes, roughly the size of the VM's RAM) |
 | `bench/` | Y2Kbench runs |
 
 If you used the app before it was renamed, your old settings folder is copied over on first launch and left in place as a backup.
@@ -66,6 +81,7 @@ If you used the app before it was renamed, your old settings folder is copied ov
 - **Chat rooms.** Hit **Chat** on the agent list, name the room and tick some buddies. When anyone speaks, each buddy in turn reads what's new and either replies or stays quiet ("passes"). There are at most two rounds per message, so rooms don't run away with your tokens. **Invite…/Remove** manage who's in, and **Block** stops them mid-flow.
 - **Chat logs.** Prefs → **Keep a log of every conversation** writes one web page per buddy (or room) per day into `logs/`.
 - **Import and export buddies.** **My Agents → Export Buddy** saves a buddy as a single `.y2kbuddy` file: its instructions, model, powers, MCP server names and icon, and optionally its memory notes. It never contains API keys or MCP settings. **My Agents → Import a Buddy** (or **Import…** in Add Buddy) brings one in. If the name is taken it gets a number, and you're told about anything it needs that you haven't set up (a provider or an MCP server).
+- **Buddy gallery.** **My Agents → Buddy Gallery…** (or **Gallery…** in Add Buddy) lists ready-made buddies from the [`buddies/`](buddies/) folder: a researcher, a data analyst, a debugger, an XP batch-file scripter, a retro gamer, an old-Windows help desk, a writer, a translator, a maths tutor, a quiz host and a cook. Click **Add**. They use your default model until you pick another. Made a good one? Export it and send a pull request (see [buddies/README.md](buddies/README.md)).
 
 ### What buddies can do
 
@@ -91,11 +107,14 @@ If you used the app before it was renamed, your old settings folder is copied ov
 
 ### Windows XP machines
 
-- **XP buddies** get `xp_boot`, `xp_screenshot`, `xp_click`, `xp_drag`, `xp_type`, `xp_key`, `xp_scroll`, `xp_wait` and `xp_shutdown`, plus `xp_guide`, a field guide to XP written for agents. **Watch** opens a live viewer window; click the screen to take over the mouse.
+- **XP buddies** get `xp_boot`, `xp_screenshot`, `xp_click`, `xp_drag`, `xp_type`, `xp_key`, `xp_scroll`, `xp_wait` and `xp_shutdown`, plus `xp_guide`, a field guide to XP written for agents. **Watch** opens a live viewer window (about 4 frames a second, sent only when the picture changes); click the screen to take over the mouse.
+- **Several actions per turn (`xp_do`).** When a buddy already knows the next few steps, say open the File menu, pick Save As, type a name and press Enter, it sends them as one `xp_do` list. They run one after another, each waiting for the screen to settle, with a single screenshot at the end. Waiting for the model is the slow part of driving XP, so this is several times quicker than one call per click. If a step fails (a label isn't on screen), the rest are skipped and the buddy is told which one.
 - **Click by label (OCR).** `xp_click_text("Save")`, `xp_click_text("File")` or `xp_click_text("My Computer", double=true)` click things by the words on them instead of coordinates, and `xp_read_screen` lists all the text on screen with positions. OCR runs offline with tesseract.js and bundled English data. It reads the whole screen enlarged, then re-reads small text one blob at a time, so short labels like "Yes"/"No" and white-on-blue title text are caught too. If a label appears more than once, the buddy is told where each copy is and picks one with `nth`.
 - **Command line (`xp_cmd`).** Buddies can run a command line inside XP and get the output back as text in one step: `mkdir`, `echo …> file`, `ren`, `move`, `copy`, `type`, `dir`, `reg`. File and settings work becomes one reliable call instead of a dozen clicks. It opens a console through Start → Run, and the output comes straight back over XP's COM1 serial port, with no screen reading involved. Turn it off per buddy in Buddy Setup.
 - **Checkpoints and undo.** `xp_checkpoint` saves the whole running machine (memory and disk), and `xp_undo` puts it back exactly as it was, open windows included. Buddies are told to checkpoint before risky steps (installs, deleting, settings, registry) and to undo instead of repairing a mess by hand. The viewer has **Checkpoint** and **Undo** buttons too. The last 3 checkpoints are kept.
 - **Shared folders.** Every XP buddy has a folder that shows up as a drive inside XP (labelled *QEMU VVFAT*, usually `D:` or `E:`). Drop files on its IM window to send them in, or press **Files** to open the folder. Anything the buddy saves to that drive inside XP lands in the folder on your computer, and buddies can read and write it from outside XP with `shared_files`, `shared_read` and `shared_write`. The drive is plugged in as a **USB stick** by default, so it can be ejected and reinserted while XP runs: that's what lets `shared_write` add a file to a running machine, and what makes checkpoints possible. If your XP install has trouble with it, Prefs → **Shared drive connects as → Hard disk** switches to the older setup (no checkpoints, and `shared_write` only while XP is off). The first boot with the USB drive shows XP's "Found New Hardware" balloon; that's normal. If an AutoPlay window pops up when the drive is reinserted, Y2Kbot closes it.
+- **Instant boot.** Prefs → Windows XP machines → **Prepare instant boot** boots XP once in the background, waits for the desktop to settle, and saves the whole machine: its memory to a file and its disk changes to a small overlay on your base image. From then on every machine starts from that saved desktop in a second or two instead of booting Windows. Each machine still gets its own throwaway copy, so nothing carries over between them. The saved desktop is tied to your current XP settings and image: change the RAM, CPU, ACPI, network, image or QEMU version and Prefs says it's out of date and machines boot the slow way until you save it again. Needs QEMU 8.2 or newer. One side effect: a machine's clock starts at the time the desktop was saved.
+- **Paste into XP.** Copy text on your computer, click into the right spot in XP, then press **Paste** in the viewer (or Ctrl+V on the viewer window). The text is typed in key by key, about 12 characters a second, up to 4,000 characters. Accented letters, curly quotes and dashes go in with XP's Alt+number codes. For anything bigger, use the shared folder.
 - **Click positions.** Most models give screen positions in pixels, but Qwen3-VL answers on a 0–1000 scale. Buddy Setup → "Click positions" defaults to **Auto**, which uses 0–1000 for Qwen3-VL models and pixels for everything else. Override it if a model's clicks consistently land in the wrong place.
 
 ## Model providers
@@ -112,7 +131,7 @@ If you used the app before it was renamed, your old settings folder is copied ov
 | LM Studio | `lmstudio` | LM Studio server (`LMSTUDIO_BASE_URL`, default `http://localhost:1234/v1`) | whatever you loaded |
 | Anything OpenAI-compatible | `custom` | `CUSTOM_BASE_URL` (+ `CUSTOM_API_KEY` if needed): vLLM, llama.cpp, Together, Mistral, DeepSeek… | |
 
-- The **default** comes from Prefs (or `RAM_PROVIDER` / `RAM_MODEL`). Each buddy can pick its own **Provider** and **Model** in Buddy Setup, so you can mix them: a cheap local model for chit-chat and a frontier model for the XP operator. Writing the model as `ollama:llama3.2` also works. Once a provider is connected, the model box is a drop-down of what it offers, tagged with what each model can do (vision, tools).
+- The **default** comes from Prefs (or `Y2K_PROVIDER` / `Y2K_MODEL`). Each buddy can pick its own **Provider** and **Model** in Buddy Setup, so you can mix them: a cheap local model for chit-chat and a frontier model for the XP operator. Writing the model as `ollama:llama3.2` also works. Once a provider is connected, the model box is a drop-down of what it offers, tagged with what each model can do (vision, tools).
 - Anthropic uses its native API, the ChatGPT plan uses OpenAI's Responses API, and everything else goes through the OpenAI Chat Completions format with tool calling. Screenshots are sent as images in a follow-up message, which is the format OpenAI-compatible servers accept.
 - **XP buddies need a model that can both see images and call tools.** Most frontier models can. On Ollama, use a vision + tools model such as `qwen2.5vl`, and expect small local models to struggle with clicking accurately. Text-only buddies work with any model that supports tool calling, or even ones that don't, as long as they don't need tools.
 - `<think>…</think>` blocks from local reasoning models are stripped before they reach your IM window.
@@ -162,6 +181,10 @@ Then boot it again without `-cdrom` and set it up so agents have an easy time:
 5. Shut down cleanly, then select the `.qcow2` in **Prefs**.
 
 The app always boots VMs in snapshot mode, so **your base image is never modified**. Every boot is a clean machine, and everything is thrown away at shutdown.
+
+### 3. Turn on instant boot (optional)
+
+Once the image boots to the desktop, press **Prepare instant boot** in Prefs. It takes as long as one normal boot plus about half a minute. After that, machines start at the desktop in a second or two. Press it again after you change the base image (Prefs tells you when).
 
 ## Y2Kbench: how well does a model drive XP?
 
@@ -222,14 +245,14 @@ The CLI picks up the settings you saved in the desktop app (XP disk, QEMU, CPU/A
 ## Project layout
 
 ```
-electron/main.mjs         desktop shell: native windows, tray, settings, starts the server
+electron/main.mjs         desktop shell: native windows, tray, settings, auto-update, starts the server
 electron/preload.cjs      the small bridge the UI uses to open windows, read settings and save files
 server/src/server.ts      startServer(): Express + WebSocket, transcripts, routing, approvals
 server/src/runner.ts      per-buddy agent loop and system prompt
 server/src/tools.ts       the tools: xp_*, shared_*, memory_*, skill_*, profile_set, send_im
 server/src/providers.ts   model providers: Anthropic + OpenAI-compatible adapters, presets
 server/src/chatgpt.ts     Sign in with ChatGPT (OAuth + PKCE, token refresh) + Responses API provider
-server/src/vm/            QEMU lifecycle, QMP, screenshots, keyboard/mouse, COM1 commands, checkpoints
+server/src/vm/            QEMU lifecycle, QMP, screenshots, keyboard/mouse, COM1 commands, checkpoints, instant boot
 server/src/ocr.ts         offline OCR for click-by-label
 server/src/knowledge.ts   the XP field guide lookup (server/knowledge/xp-guide.md)
 server/src/rooms.ts       chat rooms: turn-taking, passes, invites
@@ -239,11 +262,12 @@ server/src/web.ts         web_fetch (HTML→text, private-address guard) + web_s
 server/src/files.ts       attachments: text/PDF/DOCX extraction, images for vision models
 server/src/mcp.ts         MCP client: stdio + HTTP/SSE servers from mcp.json, approval rules
 server/src/logs.ts        chat logs and Save Conversation (text / web page)
-server/src/buddyfile.ts   .y2kbuddy import/export
+server/src/buddyfile.ts   .y2kbuddy import/export and the buddy gallery
 server/src/bench.ts       Y2Kbench engine: fresh VM per task, setup/check batch files, scoring, history
 server/src/bench-cli.ts   `npm run bench` (headless benchmark runs)
 server/bench/tasks.json   the 21 benchmark tasks
 server/agents.json        the starter agent list (copied to your data folder on first run)
+buddies/                  the buddy gallery: ready-made .y2kbuddy files
 web/                      the retro UI; each page renders one window (?view=buddylist|im|viewer|…)
 web/avatars/              the 48×48 buddy icons
 web/icons/                toolbar and button icons
@@ -267,4 +291,4 @@ Y2Kbot is an independent hobby project. It is not affiliated with, endorsed by o
 
 ## Licence
 
-[MIT](LICENSE) © 2026 Tate
+[MIT](LICENSE) © 2026 Y2Kbot contributors

@@ -19,7 +19,8 @@ at `knowledge/xp-guide.md` overrides this one.
 10. **Verify, don't assume.** After saving or creating something, prove it: `xp_cmd("dir C:\work")` or `xp_cmd("type C:\work\notes.txt")`, or open the folder.
 11. **Your shared drive is usually D: or E:** (label *QEMU VVFAT*; `xp_cmd("vol D: & vol E:")` tells you). It's how files get in and out. Wait a few seconds after saving there before shutting down.
 12. **Checkpoint before risky steps.** `xp_checkpoint("before install")` saves the whole machine; if things go wrong, `xp_undo()` puts it back exactly, which is quicker and safer than repairing by hand.
-13. **Reuse what worked.** `skill_search("rename file")` finds recipes buddies saved before. When you finish a multi-step task that worked, `skill_save` the steps.
+13. **Batch what you already know with `xp_do`.** `xp_do([{"do":"click_text","text":"File"},{"do":"click_text","text":"Save As..."},{"do":"type","text":"C:\\work\\notes.txt"},{"do":"key","combo":"enter"}])` runs all four steps and shows you one screenshot at the end. Every round trip to you is the slow part, so batching makes you several times faster. If a step fails, the rest are skipped and you're told which one.
+14. **Reuse what worked.** `skill_search("rename file")` finds recipes buddies saved before. When you finish a multi-step task that worked, `skill_save` the steps.
 
 ## layout: What the screen looks like
 

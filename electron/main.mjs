@@ -1,7 +1,7 @@
 // Y2Kbot — desktop shell.
 // Runs the agent server in-process on localhost and gives every messenger
 // window (sign-on, agent list, each IM, each XP viewer) its own native window.
-import { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, dialog, shell, safeStorage } from "electron";
+import { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, dialog, shell, safeStorage, clipboard } from "electron";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -11,27 +11,14 @@ const root = path.resolve(here, "..");
 const isWin = process.platform === "win32";
 const isMac = process.platform === "darwin";
 
-// ---------------- data folder (+ move settings over from the old name) ----------------
-// Before the rename this app was "Retro Agent Messenger", whose data lived in a folder of that
-// name (or "retro-agent-messenger"). Copy it once so keys, memory, MCP config and the
-// agent list carry over. The old folder is left in place as a backup.
+// ---------------- data folder ----------------
 app.setName("Y2Kbot");
-{
-  const appData = app.getPath("appData");
-  const dir = path.join(appData, "Y2Kbot");
-  if (!fs.existsSync(dir)) {
-    const old = ["retro-agent-messenger", "Retro Agent Messenger"].map((n) => path.join(appData, n))
-      .find((d) => fs.existsSync(path.join(d, "settings.json")) || fs.existsSync(path.join(d, "agents.json")));
-    if (old) {
-      try { fs.cpSync(old, dir, { recursive: true, filter: (src) => !/Singleton(Lock|Socket|Cookie)$/.test(src) }); }
-      catch (e) { console.error("Couldn't copy old settings:", e); }
-    }
-  }
-  app.setPath("userData", dir);
-}
+app.setPath("userData", path.join(app.getPath("appData"), "Y2Kbot"));
 
-if (!app.requestSingleInstanceLock()) app.quit();
-if (isWin) app.setAppUserModelId("dev.tate.y2kbot");
+// app.quit() isn't immediate, so a second copy must also skip starting up (see whenReady).
+const firstInstance = app.requestSingleInstanceLock();
+if (!firstInstance) app.quit();
+if (isWin) app.setAppUserModelId("io.y2kbot.app");
 
 // ---------------- settings (userData/settings.json) ----------------
 const userDir = () => app.getPath("userData");
@@ -55,6 +42,9 @@ const DEFAULTS = {
   searxngUrl: "",
   webAllowPrivate: false,
   chatLogs: false, // keep a log file of every conversation (data folder → logs)
+  xpInstantBoot: true, // start XP machines from a saved desktop once one has been prepared
+  checkUpdates: true,  // look for a new version on GitHub at startup
+  skipVersion: "",     // "Skip this version" in the update window
 };
 
 // provider id → env vars the server reads (see server/src/providers.ts)
@@ -107,6 +97,9 @@ function writeSettings(input) {
   next.searxngUrl = /^https?:\/\//.test(String(next.searxngUrl || "").trim()) ? String(next.searxngUrl).trim() : "";
   next.webAllowPrivate = !!next.webAllowPrivate;
   next.chatLogs = !!next.chatLogs;
+  next.xpInstantBoot = next.xpInstantBoot !== false;
+  next.checkUpdates = next.checkUpdates !== false;
+  next.skipVersion = String(next.skipVersion || "").slice(0, 40);
   for (const [id, v] of Object.entries(input.baseUrls || {})) {
     if (!(id in URL_ENV)) continue;
     const url = String(v || "").trim();
@@ -127,8 +120,8 @@ function applySettingsToEnv() {
   // Saved keys win; an env var you already had set still works if nothing is saved.
   for (const [id, env] of Object.entries(KEY_ENV)) { const v = decodeKey(s.keys[id]); if (v) process.env[env] = v; }
   for (const [id, env] of Object.entries(URL_ENV)) if (s.baseUrls?.[id]) process.env[env] = s.baseUrls[id];
-  process.env.RAM_PROVIDER = s.provider || "anthropic";
-  if (s.model) process.env.RAM_MODEL = s.model; else delete process.env.RAM_MODEL;
+  process.env.Y2K_PROVIDER = s.provider || "anthropic";
+  if (s.model) process.env.Y2K_MODEL = s.model; else delete process.env.Y2K_MODEL;
   process.env.XP_BASE_IMAGE = s.xpBaseImage || process.env.XP_BASE_IMAGE || "";
   process.env.QEMU_BIN = s.qemuBin || DEFAULTS.qemuBin;
   process.env.XP_MEMORY_MB = String(s.xpMemoryMb);
@@ -143,15 +136,16 @@ function applySettingsToEnv() {
   if (s.searxngUrl) process.env.SEARXNG_URL = s.searxngUrl;
   process.env.WEB_ALLOW_PRIVATE = s.webAllowPrivate ? "1" : "0";
   process.env.CHAT_LOGS = s.chatLogs ? "1" : "0";
+  process.env.XP_INSTANT_BOOT = s.xpInstantBoot === false ? "0" : "1";
 }
 
 // ---------------- windows ----------------
 const SIZES = {
   signon: [250, 470], buddylist: [240, 580], im: [440, 420], viewer: [720, 620],
   info: [380, 420], editor: [420, 720], help: [400, 380], prefs: [470, 860],
-  room: [620, 480], invite: [330, 420], mcp: [500, 600], bench: [720, 780], skills: [480, 620], approve: [420, 330],
+  room: [620, 480], invite: [330, 420], mcp: [500, 600], bench: [720, 780], skills: [480, 620], approve: [420, 330], update: [400, 360], gallery: [460, 600],
 };
-const FIXED = new Set(["signon", "info", "help", "approve"]);
+const FIXED = new Set(["signon", "info", "help", "approve", "update"]);
 const wins = new Map(); // "view:arg" -> BrowserWindow
 let base = "";
 let srv = null;
@@ -162,7 +156,7 @@ let quitting = false;
 function placement(view, w, h) {
   const wa = screen.getPrimaryDisplay().workArea;
   if (view === "buddylist") return { x: wa.x + wa.width - w - 24, y: wa.y + 24 };
-  if (["signon", "prefs", "editor", "help", "info", "invite", "mcp", "skills", "approve"].includes(view))
+  if (["signon", "prefs", "editor", "help", "info", "invite", "mcp", "skills", "approve", "update", "gallery"].includes(view))
     return { x: Math.round(wa.x + (wa.width - w) / 2), y: Math.round(wa.y + Math.max(20, (wa.height - h) / 2)) };
   if (view === "viewer") return { x: wa.x + Math.max(20, wa.width - w - 300), y: wa.y + 40 };
   const n = cascade++ % 8;
@@ -223,6 +217,7 @@ function setupTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "Show Agent List", click: () => (wins.has("buddylist:") ? open({ view: "buddylist" }) : open({ view: "signon" })) },
     { label: "Preferences…", click: () => open({ view: "prefs" }) },
+    { label: "Check for Updates…", click: () => checkForUpdates(true) },
     { type: "separator" },
     { label: "Sign Off", click: signOff },
     { label: "Quit", click: () => app.quit() },
@@ -232,12 +227,12 @@ function setupTray() {
 
 // ---------------- IPC ----------------
 const fromEvent = (e) => BrowserWindow.fromWebContents(e.sender);
-ipcMain.on("ram:open", (_e, o) => open(o || {}));
-ipcMain.on("ram:close", (e) => fromEvent(e)?.close());
-ipcMain.on("ram:minimize", (e) => fromEvent(e)?.minimize());
-ipcMain.on("ram:flash", (e) => { const w = fromEvent(e); if (w && !w.isFocused()) w.flashFrame(true); });
+ipcMain.on("y2k:open", (_e, o) => open(o || {}));
+ipcMain.on("y2k:close", (e) => fromEvent(e)?.close());
+ipcMain.on("y2k:minimize", (e) => fromEvent(e)?.minimize());
+ipcMain.on("y2k:flash", (e) => { const w = fromEvent(e); if (w && !w.isFocused()) w.flashFrame(true); });
 // Size a dialog to its content, as tall as the screen allows, and keep it fully on screen.
-ipcMain.on("ram:fit", (e, h) => {
+ipcMain.on("y2k:fit", (e, h) => {
   const w = fromEvent(e);
   if (!w || !Number.isFinite(h)) return;
   const wa = screen.getDisplayMatching(w.getBounds()).workArea;
@@ -248,43 +243,45 @@ ipcMain.on("ram:fit", (e, h) => {
   const y = Math.max(wa.y + 8, Math.min(b.y, wa.y + wa.height - b.height - 8));
   if (y !== b.y) w.setPosition(b.x, y);
 });
-ipcMain.on("ram:signedOn", (e) => { open({ view: "buddylist" }); fromEvent(e)?.close(); });
-ipcMain.on("ram:signOff", () => signOff());
-ipcMain.on("ram:relaunch", () => { app.relaunch(); app.quit(); });
+ipcMain.on("y2k:signedOn", (e) => { open({ view: "buddylist" }); fromEvent(e)?.close(); });
+ipcMain.on("y2k:signOff", () => signOff());
+ipcMain.on("y2k:relaunch", () => { app.relaunch(); app.quit(); });
 // Only folders inside the app's own data folder (the buddies' shared folders) can be opened.
-ipcMain.on("ram:openPath", (_e, p) => {
+// Folders, never files: opening a .bat or .exe an agent wrote there would run it.
+ipcMain.on("y2k:openPath", (_e, p) => {
   const target = path.resolve(String(p || ""));
   const root = path.resolve(userDir()) + path.sep;
-  if (target.startsWith(root) && fs.existsSync(target)) shell.openPath(target);
+  if (target.startsWith(root) && fs.statSync(target, { throwIfNoEntry: false })?.isDirectory()) shell.openPath(target);
 });
 // Folders inside the data folder the UI may open (created if missing).
-ipcMain.on("ram:openDataFolder", (_e, sub) => {
+ipcMain.on("y2k:openDataFolder", (_e, sub) => {
   if (!["logs", "shared", "memory", "bench"].includes(sub)) return;
   const dir = path.join(userDir(), sub);
   fs.mkdirSync(dir, { recursive: true });
   shell.openPath(dir);
 });
-ipcMain.handle("ram:saveText", async (e, o = {}) => {
+ipcMain.handle("y2k:saveText", async (e, o = {}) => {
   const r = await dialog.showSaveDialog(fromEvent(e), { defaultPath: path.join(app.getPath("documents"), String(o.defaultName || "untitled.txt").replace(/[\\/:*?"<>|]/g, "_")), filters: o.filters });
   if (r.canceled || !r.filePath) return null;
   fs.writeFileSync(r.filePath, String(o.text ?? ""));
   return r.filePath;
 });
-ipcMain.handle("ram:openText", async (e, o = {}) => {
+ipcMain.handle("y2k:openText", async (e, o = {}) => {
   const r = await dialog.showOpenDialog(fromEvent(e), { properties: ["openFile"], filters: o.filters, title: o.title });
   if (r.canceled || !r.filePaths[0]) return null;
   const f = r.filePaths[0];
   if (fs.statSync(f).size > 1024 * 1024) throw new Error("That file is too big.");
   return { name: path.basename(f), text: fs.readFileSync(f, "utf8") };
 });
-ipcMain.handle("ram:getSettings", () => {
+ipcMain.handle("y2k:readClipboard", () => clipboard.readText());
+ipcMain.handle("y2k:getSettings", () => {
   const { keys, ...rest } = readSettings();
   // never send keys back to the UI, only whether each one is set
   const keysSet = Object.fromEntries(Object.entries(KEY_ENV).map(([id, env]) => [id, !!decodeKey(keys[id]) || !!process.env[env]]));
   return { ...rest, keysSet, health: srv ? { demoMode: srv.demoMode, xp: srv.xp, provider: srv.provider, model: srv.model, providers: srv.providers } : null };
 });
-ipcMain.handle("ram:saveSettings", (_e, s) => { writeSettings(s || {}); return true; });
-ipcMain.handle("ram:pickFile", async (e, o = {}) => {
+ipcMain.handle("y2k:saveSettings", (_e, s) => { writeSettings(s || {}); return true; });
+ipcMain.handle("y2k:pickFile", async (e, o = {}) => {
   const r = await dialog.showOpenDialog(fromEvent(e), { properties: ["openFile"], filters: o.filters, title: o.title });
   return r.canceled ? null : r.filePaths[0];
 });
@@ -293,9 +290,10 @@ ipcMain.handle("ram:pickFile", async (e, o = {}) => {
 app.on("second-instance", () => (wins.has("buddylist:") ? open({ view: "buddylist" }) : open({ view: "signon" })));
 app.on("before-quit", () => { quitting = true; srv?.close(); });
 app.on("window-all-closed", () => { if (!isMac) app.quit(); });
-app.on("activate", () => { if (wins.size === 0) open({ view: "signon" }); });
+app.on("activate", () => { if (firstInstance && base && wins.size === 0) open({ view: "signon" }); });
 
 app.whenReady().then(async () => {
+  if (!firstInstance) return;
   applySettingsToEnv();
   // First run: copy the starter agent list somewhere writable.
   const agentsFile = path.join(userDir(), "agents.json");
@@ -304,7 +302,7 @@ app.whenReady().then(async () => {
     fs.copyFileSync(path.join(root, "server/agents.json"), agentsFile);
   }
   const { startServer } = await import(pathToFileURL(path.join(root, "dist/server.js")).href);
-  const preferred = Number(process.env.RAM_PORT || 47823); // fixed port keeps your saved screen name
+  const preferred = Number(process.env.Y2K_PORT || 47823); // fixed port keeps your saved screen name
   const dataDir = userDir(); // memory notes + shared folders live next to settings.json
   // Sign-in tokens (ChatGPT plan) are encrypted with the OS keychain, like API keys.
   const secrets = safeStorage.isEncryptionAvailable()
@@ -316,4 +314,85 @@ app.whenReady().then(async () => {
   if (isMac) app.dock?.setIcon(path.join(root, "assets/icon.png"));
   setupTray();
   open({ view: "signon" });
+  if (readSettings().checkUpdates !== false) {
+    setTimeout(() => checkForUpdates(false), 15_000);
+    setInterval(() => checkForUpdates(false), 6 * 60 * 60_000).unref();
+  }
 });
+
+// ---------------- updates ----------------
+// New versions come from GitHub Releases (the "publish" setting in package.json). Windows and the
+// Linux AppImage download and install them; macOS builds aren't code-signed, which macOS requires
+// for self-updating, so there the update window links to the download page instead.
+const RELEASES = "https://github.com/tatethedeveloper/Y2KBot/releases/latest";
+const update = { state: "idle", current: app.getVersion(), version: "", notes: "", percent: 0, error: "", manual: false };
+let updater = null;
+const canSelfUpdate = () => app.isPackaged && (isWin || (process.platform === "linux" && !!process.env.APPIMAGE));
+
+function setUpdate(patch) {
+  Object.assign(update, patch);
+  for (const w of BrowserWindow.getAllWindows()) if (!w.isDestroyed()) w.webContents.send("y2k:update", update);
+}
+
+async function getUpdater() {
+  if (updater) return updater;
+  const { default: pkg } = await import("electron-updater");
+  updater = pkg.autoUpdater;
+  updater.autoDownload = false;
+  updater.autoInstallOnAppQuit = true;
+  updater.logger = null;
+  updater.on("update-available", (info) => {
+    const notes = Array.isArray(info.releaseNotes) ? info.releaseNotes.map((n) => n.note || "").join("\n\n") : String(info.releaseNotes || "");
+    setUpdate({ state: "available", version: info.version, notes: htmlToText(notes), error: "", manual: !canSelfUpdate() });
+  });
+  updater.on("update-not-available", () => setUpdate({ state: "none", error: "" }));
+  updater.on("download-progress", (p) => setUpdate({ state: "downloading", percent: Math.round(p.percent || 0) }));
+  updater.on("update-downloaded", () => setUpdate({ state: "ready", percent: 100 }));
+  updater.on("error", (e) => setUpdate({ state: "error", error: String(e?.message || e).split("\n")[0].slice(0, 300) }));
+  return updater;
+}
+
+/** @param {boolean} asked true when you picked "Check for Updates…" (always show the window then) */
+async function checkForUpdates(asked) {
+  if (!app.isPackaged) {
+    if (asked) { setUpdate({ state: "error", error: "Updates only work in the installed app. You're running from source: use git pull." }); open({ view: "update" }); }
+    return;
+  }
+  if (["checking", "downloading", "ready"].includes(update.state)) { if (asked) open({ view: "update" }); return; }
+  setUpdate({ state: "checking", error: "" });
+  if (asked) open({ view: "update" });
+  try {
+    await (await getUpdater()).checkForUpdates();
+  } catch (e) {
+    setUpdate({ state: "error", error: String(e?.message || e).split("\n")[0].slice(0, 300) });
+  }
+  // Only interrupt you unasked for a version you haven't skipped.
+  if (!asked && update.state === "available" && update.version !== readSettings().skipVersion) open({ view: "update", focus: false });
+}
+
+function htmlToText(html) {
+  return String(html)
+    .replace(/<(br|\/p|\/li|\/h\d)\s*\/?>/gi, "\n").replace(/<li[^>]*>/gi, "• ").replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/\n{3,}/g, "\n\n").trim().slice(0, 4000);
+}
+
+ipcMain.handle("y2k:update:get", () => update);
+ipcMain.on("y2k:update:check", () => checkForUpdates(true));
+ipcMain.on("y2k:update:download", async () => {
+  if (update.state !== "available") return;
+  if (update.manual) { shell.openExternal(RELEASES); return; }
+  setUpdate({ state: "downloading", percent: 0 });
+  try { await (await getUpdater()).downloadUpdate(); }
+  catch (e) { setUpdate({ state: "error", error: String(e?.message || e).split("\n")[0].slice(0, 300) }); }
+});
+ipcMain.on("y2k:update:install", () => {
+  if (update.state !== "ready" || !updater) return;
+  quitting = true;
+  srv?.close();
+  setImmediate(() => updater.quitAndInstall(false, true));
+});
+ipcMain.on("y2k:update:skip", () => {
+  if (update.version) writeSettings({ skipVersion: update.version });
+});
+ipcMain.on("y2k:update:releases", () => shell.openExternal(RELEASES));
